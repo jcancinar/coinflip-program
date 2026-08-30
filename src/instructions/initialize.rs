@@ -1,4 +1,5 @@
-use crate::state::{Config, CONFIG_SEED, DEFAULT_FEE_BPS};
+use crate::state::{Config, CONFIG_SEED, DEFAULT_FEE_BPS, DEFAULT_SOL_MIN_AMOUNT};
+use crate::vrf::ORAO_VRF_ID;
 use anchor_lang::prelude::*;
 
 #[derive(Accounts)]
@@ -25,5 +26,7 @@ pub fn handler(ctx: Context<Initialize>, resolver: Pubkey) -> Result<()> {
     config.bump = ctx.bumps.config;
     config.usdc_mint = Pubkey::default();
     config.sol_usdc_pool = Pubkey::default();
+    config.sol_min_amount = DEFAULT_SOL_MIN_AMOUNT;
+    config.vrf_program = ORAO_VRF_ID;
     Ok(())
 }

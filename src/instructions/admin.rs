@@ -1,5 +1,8 @@
 use crate::errors::CoinflipError;
-use crate::state::{Config, TokenConfig, BPS_DENOMINATOR, CONFIG_SEED, TOKEN_SEED};
+use crate::state::{
+    Config, TokenConfig, CONFIG_SEED, DEFAULT_SOL_MIN_AMOUNT, MAX_FEE_BPS, TOKEN_SEED,
+};
+use crate::vrf::ORAO_VRF_ID;
 use anchor_lang::prelude::*;
 
 #[derive(Accounts)]
@@ -31,6 +34,24 @@ pub fn set_resolver(ctx: Context<SetResolver>, resolver: Pubkey) -> Result<()> {
     Ok(())
 }
 
+#[derive(Accounts)]
+pub struct SetAuthority<'info> {
+    #[account(
+        mut,
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+        has_one = authority @ CoinflipError::Unauthorized
+    )]
+    pub config: Account<'info, Config>,
+    pub authority: Signer<'info>,
+}
+
+pub fn set_authority(ctx: Context<SetAuthority>, authority: Pubkey) -> Result<()> {
+    require!(authority != Pubkey::default(), CoinflipError::Unauthorized);
+    ctx.accounts.config.authority = authority;
+    Ok(())
+}
+
 pub fn set_paused(ctx: Context<SetPaused>, paused: bool) -> Result<()> {
     ctx.accounts.config.paused = paused;
     Ok(())
@@ -49,7 +70,7 @@ pub struct SetFeeBps<'info> {
 }
 
 pub fn set_fee_bps(ctx: Context<SetFeeBps>, fee_bps: u16) -> Result<()> {
-    require!(fee_bps <= BPS_DENOMINATOR, CoinflipError::InvalidFeeBps);
+    require!(fee_bps <= MAX_FEE_BPS, CoinflipError::InvalidFeeBps);
     ctx.accounts.config.fee_bps = fee_bps;
     Ok(())
 }
@@ -130,6 +151,42 @@ pub fn set_sol_usdc_pool(
 }
 
 #[derive(Accounts)]
+pub struct SetSolMinAmount<'info> {
+    #[account(
+        mut,
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+        has_one = authority @ CoinflipError::Unauthorized
+    )]
+    pub config: Account<'info, Config>,
+    pub authority: Signer<'info>,
+}
+
+pub fn set_sol_min_amount(ctx: Context<SetSolMinAmount>, sol_min_amount: u64) -> Result<()> {
+    require!(sol_min_amount > 0, CoinflipError::InvalidMinAmount);
+    ctx.accounts.config.sol_min_amount = sol_min_amount;
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct SetVrfProgram<'info> {
+    #[account(
+        mut,
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+        has_one = authority @ CoinflipError::Unauthorized
+    )]
+    pub config: Account<'info, Config>,
+    pub authority: Signer<'info>,
+}
+
+pub fn set_vrf_program(ctx: Context<SetVrfProgram>, vrf_program: Pubkey) -> Result<()> {
+    require!(vrf_program != Pubkey::default(), CoinflipError::InvalidVrfProgram);
+    ctx.accounts.config.vrf_program = vrf_program;
+    Ok(())
+}
+
+#[derive(Accounts)]
 pub struct MigrateConfig<'info> {
     /// CHECK: config PDA; resized from the previous layout
     #[account(mut, seeds = [CONFIG_SEED], bump)]
@@ -149,7 +206,8 @@ pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {
     require_config_authority(
         &ctx.accounts.config.to_account_info(),
         &ctx.accounts.authority.key(),
-    )
+    )?;
+    init_new_config_fields(&ctx.accounts.config.to_account_info())
 }
 
 #[derive(Accounts)]
@@ -211,6 +269,20 @@ fn resize_owned_account<'info>(
             extra,
         )?;
     }
-    account.realloc(new_len, false)?;
+    account.realloc(new_len, true)?;
+    Ok(())
+}
+
+fn init_new_config_fields(config: &AccountInfo) -> Result<()> {
+    let mut data = config.try_borrow_mut_data()?;
+    let vrf_off = 8 + Config::INIT_SPACE - 32;
+    let sol_off = vrf_off - 8;
+    require!(data.len() >= vrf_off + 32, CoinflipError::Unauthorized);
+    if data[sol_off..sol_off + 8] == [0u8; 8] {
+        data[sol_off..sol_off + 8].copy_from_slice(&DEFAULT_SOL_MIN_AMOUNT.to_le_bytes());
+    }
+    if data[vrf_off..vrf_off + 32] == [0u8; 32] {
+        data[vrf_off..vrf_off + 32].copy_from_slice(ORAO_VRF_ID.as_ref());
+    }
     Ok(())
 }

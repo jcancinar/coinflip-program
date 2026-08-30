@@ -1,5 +1,6 @@
 use crate::errors::CoinflipError;
 use crate::instructions::join::apply_join;
+use crate::vrf::{request_randomness, vrf_seed};
 use crate::state::{
     effective_mint, is_sol_mint, Config, Game, Side, TokenConfig, CONFIG_SEED, GAME_SEED, WSOL_MINT,
 };
@@ -46,6 +47,17 @@ pub struct Participate<'info> {
     )]
     pub joiner: Signer<'info>,
     pub system_program: Program<'info, System>,
+    /// CHECK: configured VRF program
+    pub vrf_program: UncheckedAccount<'info>,
+    /// CHECK: VRF network state
+    #[account(mut)]
+    pub vrf_network: UncheckedAccount<'info>,
+    /// CHECK: VRF treasury
+    #[account(mut)]
+    pub vrf_treasury: UncheckedAccount<'info>,
+    /// CHECK: VRF request PDA
+    #[account(mut)]
+    pub vrf_request: UncheckedAccount<'info>,
 }
 
 pub fn handler<'info>(
@@ -89,7 +101,7 @@ pub fn handler<'info>(
             ),
             amount,
         )?;
-        return Ok(());
+        return request_join_vrf(&ctx);
     }
 
     let mint_account = ctx
@@ -126,7 +138,23 @@ pub fn handler<'info>(
         decimals,
     )?;
 
-    Ok(())
+    request_join_vrf(&ctx)
+}
+
+fn request_join_vrf<'info>(
+    ctx: &Context<'_, '_, 'info, 'info, Participate<'info>>,
+) -> Result<()> {
+    let game = ctx.accounts.game.key();
+    request_randomness(
+        &ctx.accounts.vrf_program.to_account_info(),
+        &ctx.accounts.joiner.to_account_info(),
+        &ctx.accounts.vrf_network.to_account_info(),
+        &ctx.accounts.vrf_treasury.to_account_info(),
+        &ctx.accounts.vrf_request.to_account_info(),
+        &ctx.accounts.system_program.to_account_info(),
+        &ctx.accounts.config.vrf_program,
+        vrf_seed(&game),
+    )
 }
 
 fn run_swaps<'info>(

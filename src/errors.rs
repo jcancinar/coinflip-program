@@ -14,23 +14,17 @@ pub enum CoinflipError {
     AlreadyJoined,
     #[msg("Game is not ready to resolve")]
     NotReady,
-    #[msg("Server entropy does not match the stored commitment")]
-    BadReveal,
     #[msg("Entropy must not be all zeros")]
     EntropyAllZero,
     #[msg("Creator cannot join their own game")]
     CannotJoinOwnGame,
     #[msg("Cancel is only allowed while the game is open")]
     CancelNotAllowed,
-    #[msg("Resolver commitment is missing")]
-    CommitMissing,
-    #[msg("Resolver commitment is already set")]
-    CommitAlreadySet,
     #[msg("Invalid side for this game")]
     InvalidSide,
     #[msg("Winner account does not match the result")]
     InvalidWinner,
-    #[msg("Fee BPS must be at most 10000")]
+    #[msg("Fee BPS must be at most 500 (5% of pot)")]
     InvalidFeeBps,
     #[msg("Arithmetic overflow")]
     ArithmeticOverflow,
@@ -62,4 +56,16 @@ pub enum CoinflipError {
     SlippageExceeded,
     #[msg("Pool does not have enough liquidity for this swap")]
     InsufficientLiquidity,
+    #[msg("Join slot hash is not available yet")]
+    SlotHashNotReady,
+    #[msg("Authority must initiate cancel and wait before closing the game")]
+    AuthorityCancelNotInitiated,
+    #[msg("Authority cancel delay has not elapsed")]
+    AuthorityCancelNotReady,
+    #[msg("VRF program does not match config")]
+    InvalidVrfProgram,
+    #[msg("VRF accounts do not match the game seed")]
+    InvalidVrfAccounts,
+    #[msg("ORAO randomness is not fulfilled yet")]
+    VrfNotFulfilled,
 }

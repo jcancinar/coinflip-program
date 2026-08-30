@@ -1,7 +1,8 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { Coinflip } from "../target/types/coinflip";
-import { Keypair, LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
+import { Keypair, LAMPORTS_PER_SOL, PublicKey, SYSVAR_SLOT_HASHES_PUBKEY } from "@solana/web3.js";
+import { MockVrf } from "../target/types/mock_vrf";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
@@ -10,11 +11,14 @@ import {
   getAccount,
   getAssociatedTokenAddressSync,
   mintTo,
+  transfer,
 } from "@solana/spl-token";
 import { createHash } from "crypto";
 import { assert, expect } from "chai";
 
 const RESULT_PREFIX = Buffer.from("coinflip_p2p_v1");
+const MOCK_VRF_PREFIX = Buffer.from("coinflip_mock_vrf");
+const MOCK_VRF_ID = new PublicKey("8DeY7XokDSxSC5nJjwuoYW8Ajjo36UH9XXpu247tcJWf");
 const AMOUNT = new anchor.BN(50_000_000);
 const DEFAULT_FEE_BPS = 350;
 const BPS_DENOMINATOR = 10_000;
@@ -38,29 +42,27 @@ function sha256(...parts: Buffer[]): Buffer {
 function resultBit(
   creatorEntropy: Buffer,
   joinerEntropy: Buffer,
-  serverEntropy: Buffer
+  vrfFirst32: Buffer
 ): number {
-  return sha256(RESULT_PREFIX, creatorEntropy, joinerEntropy, serverEntropy)[0] & 1;
+  return sha256(RESULT_PREFIX, creatorEntropy, joinerEntropy, vrfFirst32)[0] & 1;
 }
 
-function resolverCommit(serverEntropy: Buffer, game: PublicKey): number[] {
-  return Array.from(sha256(serverEntropy, game.toBuffer()));
+function mockVrfFirst32(game: PublicKey): Buffer {
+  return sha256(MOCK_VRF_PREFIX, game.toBuffer());
 }
 
-function grindJoinerEntropy(
-  creatorEntropy: Buffer,
-  serverEntropy: Buffer,
-  desiredBit: number
-): Buffer {
-  const joinerEntropy = Buffer.alloc(32);
-  joinerEntropy[0] = 1;
-  for (let i = 0; i < 1_000_000; i++) {
-    joinerEntropy.writeUInt32BE(i, 28);
-    if (resultBit(creatorEntropy, joinerEntropy, serverEntropy) === desiredBit) {
-      return Buffer.from(joinerEntropy);
-    }
-  }
-  throw new Error("failed to grind joiner entropy");
+function vrfRequestPda(game: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("orao-vrf-randomness-request"), game.toBuffer()],
+    MOCK_VRF_ID
+  )[0];
+}
+
+function vrfNetworkPda(): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("orao-vrf-network-configuration")],
+    MOCK_VRF_ID
+  )[0];
 }
 
 function entropy(fill: number): Buffer {
@@ -74,6 +76,7 @@ describe("coinflip", () => {
   anchor.setProvider(provider);
 
   const program = anchor.workspace.Coinflip as Program<Coinflip>;
+  const mockVrf = anchor.workspace.MockVrf as Program<MockVrf>;
   const connection = provider.connection;
   const owner = (provider.wallet as anchor.Wallet).payer;
 
@@ -133,7 +136,7 @@ describe("coinflip", () => {
 
     await program.methods
       .create(amount, side, Array.from(creatorEntropy), gameNonce, mint)
-      .accounts({
+      .accountsPartial({
         creator: params.creator.publicKey,
         tokenConfig: null,
         mintAccount: null,
@@ -147,18 +150,6 @@ describe("coinflip", () => {
       .rpc();
 
     return { game, gameNonce, creatorEntropy, amount, side, mint };
-  }
-
-  async function commitGame(game: PublicKey, serverEntropy = entropy(9)) {
-    await program.methods
-      .commitResolve(resolverCommit(serverEntropy, game))
-      .accounts({
-        game,
-        resolver: resolver.publicKey,
-      })
-      .signers([resolver])
-      .rpc();
-    return serverEntropy;
   }
 
   async function joinGame(params: {
@@ -176,18 +167,40 @@ describe("coinflip", () => {
         Array.from(joinerEntropy),
         params.amount ?? AMOUNT
       )
-      .accounts({
+      .accountsPartial({
         game: params.game,
         joiner: params.joiner.publicKey,
         mintAccount: null,
         joinerToken: null,
         vault: null,
         tokenProgram: null,
+        vrfProgram: MOCK_VRF_ID,
+        vrfNetwork: vrfNetworkPda(),
+        vrfTreasury: owner.publicKey,
+        vrfRequest: vrfRequestPda(params.game),
         ...(params.tokenAccounts ?? {}),
       })
       .signers([params.joiner])
       .rpc();
     return joinerEntropy;
+  }
+
+  async function initiateCancel(game: PublicKey) {
+    await program.methods
+      .initiateCancel()
+      .accountsPartial({
+        game,
+        authority: owner.publicKey,
+      })
+      .rpc();
+  }
+
+  async function waitUntilSlot(slot: number) {
+    for (let i = 0; i < 200; i++) {
+      if ((await connection.getSlot("processed")) >= slot) return;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    throw new Error(`timed out waiting for slot ${slot}`);
   }
 
   async function cancelGame(
@@ -198,7 +211,7 @@ describe("coinflip", () => {
     const signers = "secretKey" in signer ? [signer as Keypair] : [];
     await program.methods
       .cancel()
-      .accounts({
+      .accountsPartial({
         game,
         creator: creator.publicKey,
         signer: signer.publicKey,
@@ -215,46 +228,54 @@ describe("coinflip", () => {
   async function resolveGame(
     game: PublicKey,
     winner: PublicKey,
-    serverEntropy: Buffer,
     tokenAccounts?: Record<string, PublicKey>
   ) {
     await program.methods
-      .resolve(Array.from(serverEntropy))
-      .accounts({
+      .resolve()
+      .accountsPartial({
         game,
         winner,
-        resolver: resolver.publicKey,
+        settler: owner.publicKey,
         feeRecipient: owner.publicKey,
         mintAccount: null,
         vault: null,
         winnerToken: null,
         feeRecipientToken: null,
         tokenProgram: null,
+        vrfRequest: vrfRequestPda(game),
         ...(tokenAccounts ?? {}),
       })
-      .signers([resolver])
       .rpc();
+  }
+
+  async function winnerForGame(game: PublicKey): Promise<PublicKey> {
+    const state = await program.account.game.fetch(game);
+    const creatorEntropy = Buffer.from(state.creatorEntropy);
+    const joinerEntropy = Buffer.from(state.joinerEntropy);
+    const bit = resultBit(creatorEntropy, joinerEntropy, mockVrfFirst32(game));
+    const creatorSide = "heads" in state.creatorSide ? 1 : 0;
+    return bit === creatorSide ? state.creator : state.joiner;
   }
 
   async function expectResolvedPayout(params: {
     game: PublicKey;
-    winner: PublicKey;
-    serverEntropy: Buffer;
+    winner?: PublicKey;
     amount?: anchor.BN;
     feeBps?: number;
   }) {
+    const winner = params.winner ?? (await winnerForGame(params.game));
     const amount = params.amount ?? AMOUNT;
     const fee = potFee(amount, params.feeBps);
     const pot = await connection.getBalance(params.game);
-    const winnerBefore = await connection.getBalance(params.winner);
+    const winnerBefore = await connection.getBalance(winner);
     const ownerBefore = await connection.getBalance(owner.publicKey);
 
-    await resolveGame(params.game, params.winner, params.serverEntropy);
+    await resolveGame(params.game, winner);
 
     assert.isNull(await program.account.game.fetchNullable(params.game));
     assert.equal(await connection.getBalance(params.game), 0);
     assert.equal(
-      await connection.getBalance(params.winner),
+      await connection.getBalance(winner),
       winnerBefore + pot - fee
     );
     // Provider wallet pays the resolve tx fee, so owner net is fee minus that cost.
@@ -273,9 +294,19 @@ describe("coinflip", () => {
 
     await program.methods
       .initialize(resolver.publicKey)
-      .accounts({
+      .accountsPartial({
         authority: owner.publicKey,
       })
+      .rpc();
+
+    await mockVrf.methods
+      .initialize()
+      .accountsPartial({ payer: owner.publicKey })
+      .rpc();
+
+    await program.methods
+      .setVrfProgram(MOCK_VRF_ID)
+      .accountsPartial({ authority: owner.publicKey })
       .rpc();
 
     const config = await program.account.config.fetch(configPda);
@@ -283,6 +314,7 @@ describe("coinflip", () => {
     assert.equal(config.resolver.toBase58(), resolver.publicKey.toBase58());
     assert.equal(config.feeBps, DEFAULT_FEE_BPS);
     assert.isFalse(config.paused);
+    assert.equal(config.solMinAmount.toString(), "10000000");
   });
 
   it("create + cancel refunds the creator and closes the game", async () => {
@@ -302,17 +334,15 @@ describe("coinflip", () => {
     assert.equal(await connection.getBalance(game), 0);
   });
 
-  it("create + commit + join + resolve pays the creator when they win", async () => {
+  it("create + join + resolve pays the creator when they win", async () => {
     const creatorEntropy = entropy(21);
-    const serverEntropy = entropy(22);
     const { game } = await createGame({
       creator,
       side: { heads: {} },
       creatorEntropy,
     });
-    await commitGame(game, serverEntropy);
 
-    const joinerEntropy = grindJoinerEntropy(creatorEntropy, serverEntropy, 1);
+    const joinerEntropy = entropy(11);
     await joinGame({
       game,
       joiner,
@@ -323,25 +353,48 @@ describe("coinflip", () => {
     const gameState = await program.account.game.fetch(game);
     assert.deepEqual(gameState.status, { ready: {} });
     assert.equal(gameState.joiner.toBase58(), joiner.publicKey.toBase58());
+    assert.isAbove(Number(gameState.joinSlot), 0);
 
     await expectResolvedPayout({
       game,
-      winner: creator.publicKey,
-      serverEntropy,
     });
   });
 
-  it("create + commit + join + resolve pays the joiner when they win", async () => {
+  it("rejects refund while the join slot hash is still available", async () => {
+    const { game } = await createGame({ creator });
+    await joinGame({ game, joiner });
+    await winnerForGame(game);
+    await expectError(
+      () =>
+        program.methods
+          .refundExpired()
+          .accountsPartial({
+            game,
+            creator: creator.publicKey,
+            joiner: joiner.publicKey,
+            mintAccount: null,
+            vault: null,
+            creatorToken: null,
+            joinerToken: null,
+            tokenProgram: null,
+            slotHashes: SYSVAR_SLOT_HASHES_PUBKEY,
+            vrfRequest: vrfRequestPda(game),
+          })
+          .rpc(),
+      "CancelNotAllowed"
+    );
+    await expectResolvedPayout({ game });
+  });
+
+  it("create + join + resolve pays the joiner when they win", async () => {
     const creatorEntropy = entropy(31);
-    const serverEntropy = entropy(32);
     const { game } = await createGame({
       creator,
       side: { open: {} },
       creatorEntropy,
     });
-    await commitGame(game, serverEntropy);
 
-    const joinerEntropy = grindJoinerEntropy(creatorEntropy, serverEntropy, 1);
+    const joinerEntropy = entropy(11);
     await joinGame({
       game,
       joiner,
@@ -355,41 +408,25 @@ describe("coinflip", () => {
 
     await expectResolvedPayout({
       game,
-      winner: joiner.publicKey,
-      serverEntropy,
     });
   });
 
-  it("rejects join without a resolver commitment", async () => {
+  it("join works without a resolver", async () => {
+    const { game } = await createGame({ creator });
+    await joinGame({ game, joiner });
+    await expectResolvedPayout({ game });
+  });
+
+  it("rejects resolve on an open game", async () => {
     const { game } = await createGame({ creator });
     await expectError(
-      () => joinGame({ game, joiner }),
-      "CommitMissing"
-    );
-  });
-
-  it("rejects a bad reveal", async () => {
-    const creatorEntropy = entropy(41);
-    const serverEntropy = entropy(42);
-    const { game } = await createGame({ creator, creatorEntropy });
-    await commitGame(game, serverEntropy);
-    const joinerEntropy = grindJoinerEntropy(creatorEntropy, serverEntropy, 1);
-    await joinGame({
-      game,
-      joiner,
-      joinerSide: { tails: {} },
-      joinerEntropy,
-    });
-
-    await expectError(
-      () => resolveGame(game, creator.publicKey, entropy(99)),
-      "BadReveal"
+      () => resolveGame(game, creator.publicKey),
+      "NotReady"
     );
   });
 
   it("rejects the creator joining their own game", async () => {
     const { game } = await createGame({ creator });
-    await commitGame(game);
     await expectError(
       () => joinGame({ game, joiner: creator }),
       "CannotJoinOwnGame"
@@ -398,7 +435,6 @@ describe("coinflip", () => {
 
   it("rejects a wrong join amount", async () => {
     const { game } = await createGame({ creator });
-    await commitGame(game);
     await expectError(
       () =>
         joinGame({
@@ -412,14 +448,12 @@ describe("coinflip", () => {
 
   it("pause blocks create and join but not resolve", async () => {
     const creatorEntropy = entropy(51);
-    const serverEntropy = entropy(52);
     const ready = await createGame({
       creator,
       side: { tails: {} },
       creatorEntropy,
     });
-    await commitGame(ready.game, serverEntropy);
-    const joinerEntropy = grindJoinerEntropy(creatorEntropy, serverEntropy, 0);
+    const joinerEntropy = entropy(11);
     await joinGame({
       game: ready.game,
       joiner,
@@ -428,11 +462,10 @@ describe("coinflip", () => {
     });
 
     const open = await createGame({ creator });
-    await commitGame(open.game);
 
     await program.methods
       .setPaused(true)
-      .accounts({
+      .accountsPartial({
         authority: owner.publicKey,
       })
       .rpc();
@@ -448,15 +481,13 @@ describe("coinflip", () => {
 
     await expectResolvedPayout({
       game: ready.game,
-      winner: creator.publicKey,
-      serverEntropy,
     });
 
     await cancelGame(open.game, creator);
 
     await program.methods
       .setPaused(false)
-      .accounts({
+      .accountsPartial({
         authority: owner.publicKey,
       })
       .rpc();
@@ -475,7 +506,20 @@ describe("coinflip", () => {
       () => cancelGame(game, stranger),
       "Unauthorized"
     );
+    await expectError(
+      () => cancelGame(game, owner),
+      "AuthorityCancelNotInitiated"
+    );
 
+    await initiateCancel(game);
+    const pending = await program.account.game.fetch(game);
+    assert.isAbove(Number(pending.cancelAfterSlot), 0);
+    await expectError(
+      () => cancelGame(game, owner),
+      "AuthorityCancelNotReady"
+    );
+
+    await waitUntilSlot(Number(pending.cancelAfterSlot));
     await cancelGame(game, owner);
 
     assert.isNull(await program.account.game.fetchNullable(game));
@@ -483,12 +527,18 @@ describe("coinflip", () => {
     assert.equal(await connection.getBalance(game), 0);
   });
 
+  it("join still works after the authority initiates cancel", async () => {
+    const { game } = await createGame({ creator });
+    await initiateCancel(game);
+    await joinGame({ game, joiner });
+    await expectResolvedPayout({ game });
+  });
+
   it("owner can change fee BPS for future games only", async () => {
     const oldFeeBps = 350;
     const newFeeBps = 500;
 
     const creatorEntropyA = entropy(61);
-    const serverEntropyA = entropy(62);
     const gameA = await createGame({
       creator,
       creatorEntropy: creatorEntropyA,
@@ -498,7 +548,7 @@ describe("coinflip", () => {
 
     await program.methods
       .setFeeBps(newFeeBps)
-      .accounts({
+      .accountsPartial({
         authority: owner.publicKey,
       })
       .rpc();
@@ -507,7 +557,6 @@ describe("coinflip", () => {
     assert.equal(config.feeBps, newFeeBps);
 
     const creatorEntropyB = entropy(63);
-    const serverEntropyB = entropy(64);
     const gameB = await createGame({
       creator,
       creatorEntropy: creatorEntropyB,
@@ -515,40 +564,32 @@ describe("coinflip", () => {
     const createdB = await program.account.game.fetch(gameB.game);
     assert.equal(createdB.feeBps, newFeeBps);
 
-    await commitGame(gameA.game, serverEntropyA);
-    const joinerEntropyA = grindJoinerEntropy(creatorEntropyA, serverEntropyA, 1);
     await joinGame({
       game: gameA.game,
       joiner,
       joinerSide: { tails: {} },
-      joinerEntropy: joinerEntropyA,
+      joinerEntropy: entropy(11),
     });
 
-    await commitGame(gameB.game, serverEntropyB);
-    const joinerEntropyB = grindJoinerEntropy(creatorEntropyB, serverEntropyB, 1);
     await joinGame({
       game: gameB.game,
       joiner,
       joinerSide: { tails: {} },
-      joinerEntropy: joinerEntropyB,
+      joinerEntropy: entropy(11),
     });
 
     await expectResolvedPayout({
       game: gameA.game,
-      winner: creator.publicKey,
-      serverEntropy: serverEntropyA,
       feeBps: oldFeeBps,
     });
     await expectResolvedPayout({
       game: gameB.game,
-      winner: creator.publicKey,
-      serverEntropy: serverEntropyB,
       feeBps: newFeeBps,
     });
 
     await program.methods
       .setFeeBps(DEFAULT_FEE_BPS)
-      .accounts({
+      .accountsPartial({
         authority: owner.publicKey,
       })
       .rpc();
@@ -559,7 +600,7 @@ describe("coinflip", () => {
       () =>
         program.methods
           .setFeeBps(400)
-          .accounts({
+          .accountsPartial({
             authority: creator.publicKey,
           })
           .signers([creator])
@@ -570,12 +611,64 @@ describe("coinflip", () => {
     await expectError(
       () =>
         program.methods
-          .setFeeBps(10_001)
-          .accounts({
+          .setFeeBps(501)
+          .accountsPartial({
             authority: owner.publicKey,
           })
           .rpc(),
       "InvalidFeeBps"
+    );
+  });
+
+  it("owner can transfer authority", async () => {
+    const next = Keypair.generate();
+    const sig = await connection.requestAirdrop(next.publicKey, LAMPORTS_PER_SOL);
+    await connection.confirmTransaction(sig, "confirmed");
+
+    await expectError(
+      () =>
+        program.methods
+          .setAuthority(next.publicKey)
+          .accountsPartial({ authority: creator.publicKey })
+          .signers([creator])
+          .rpc(),
+      "Unauthorized"
+    );
+    await expectError(
+      () =>
+        program.methods
+          .setAuthority(PublicKey.default)
+          .accountsPartial({ authority: owner.publicKey })
+          .rpc(),
+      "Unauthorized"
+    );
+
+    await program.methods
+      .setAuthority(next.publicKey)
+      .accountsPartial({ authority: owner.publicKey })
+      .rpc();
+    assert.equal(
+      (await program.account.config.fetch(configPda)).authority.toBase58(),
+      next.publicKey.toBase58()
+    );
+
+    await expectError(
+      () =>
+        program.methods
+          .setFeeBps(400)
+          .accountsPartial({ authority: owner.publicKey })
+          .rpc(),
+      "Unauthorized"
+    );
+
+    await program.methods
+      .setAuthority(owner.publicKey)
+      .accountsPartial({ authority: next.publicKey })
+      .signers([next])
+      .rpc();
+    assert.equal(
+      (await program.account.config.fetch(configPda)).authority.toBase58(),
+      owner.publicKey.toBase58()
     );
   });
 
@@ -591,7 +684,7 @@ describe("coinflip", () => {
       () =>
         program.methods
           .enableToken(mint, minAmount, true, DUMMY_POOL, WSOL_MINT, false)
-          .accounts({
+          .accountsPartial({
             authority: creator.publicKey,
           })
           .signers([creator])
@@ -603,7 +696,7 @@ describe("coinflip", () => {
       () =>
         program.methods
           .enableToken(mint, new anchor.BN(0), true, DUMMY_POOL, WSOL_MINT, false)
-          .accounts({
+          .accountsPartial({
             authority: owner.publicKey,
           })
           .rpc(),
@@ -614,7 +707,7 @@ describe("coinflip", () => {
       () =>
         program.methods
           .enableToken(mint, minAmount, true, PublicKey.default, WSOL_MINT, false)
-          .accounts({
+          .accountsPartial({
             authority: owner.publicKey,
           })
           .rpc(),
@@ -623,7 +716,7 @@ describe("coinflip", () => {
 
     await program.methods
       .enableToken(mint, minAmount, true, DUMMY_POOL, WSOL_MINT, false)
-      .accounts({
+      .accountsPartial({
         authority: owner.publicKey,
       })
       .rpc();
@@ -639,7 +732,7 @@ describe("coinflip", () => {
     const updatedMin = new anchor.BN(2_500_000);
     await program.methods
       .enableToken(mint, updatedMin, false, PublicKey.default, PublicKey.default, false)
-      .accounts({
+      .accountsPartial({
         authority: owner.publicKey,
       })
       .rpc();
@@ -649,7 +742,7 @@ describe("coinflip", () => {
     assert.isFalse(tokenConfig.isEnabled);
   });
 
-  it("token game create + commit + join + resolve pays the winner minus fee", async () => {
+  it("token game create + join + resolve pays the winner minus fee", async () => {
     const tokenAmount = new anchor.BN(2_000_000);
     const mint = await createMint(connection, owner, owner.publicKey, null, 6);
     const [tokenConfigPda] = PublicKey.findProgramAddressSync(
@@ -659,7 +752,7 @@ describe("coinflip", () => {
 
     await program.methods
       .enableToken(mint, new anchor.BN(1_000_000), true, DUMMY_POOL, WSOL_MINT, false)
-      .accounts({ authority: owner.publicKey })
+      .accountsPartial({ authority: owner.publicKey })
       .rpc();
 
     const creatorAta = await createAssociatedTokenAccountIdempotent(
@@ -684,7 +777,6 @@ describe("coinflip", () => {
     await mintTo(connection, owner, mint, joinerAta, owner, 10_000_000);
 
     const creatorEntropy = entropy(71);
-    const serverEntropy = entropy(72);
     const gameNonce = nextNonce();
     const game = gamePdaFor(creator.publicKey, gameNonce);
     const vault = getAssociatedTokenAddressSync(mint, game, true);
@@ -711,8 +803,7 @@ describe("coinflip", () => {
     assert.equal(gameState.tokenDecimals, 6);
     assert.equal((await getAccount(connection, vault)).amount.toString(), tokenAmount.toString());
 
-    await commitGame(game, serverEntropy);
-    const joinerEntropy = grindJoinerEntropy(creatorEntropy, serverEntropy, 1);
+    const joinerEntropy = entropy(11);
     await joinGame({
       game,
       joiner,
@@ -733,21 +824,23 @@ describe("coinflip", () => {
     );
 
     const fee = potFee(tokenAmount);
-    const creatorBefore = (await getAccount(connection, creatorAta)).amount;
+    const winner = await winnerForGame(game);
+    const winnerToken = winner.equals(creator.publicKey) ? creatorAta : joinerAta;
+    const winnerBefore = (await getAccount(connection, winnerToken)).amount;
     const ownerBefore = (await getAccount(connection, ownerAta)).amount;
 
-    await resolveGame(game, creator.publicKey, serverEntropy, {
+    await resolveGame(game, winner, {
       mintAccount: mint,
       vault,
-      winnerToken: creatorAta,
+      winnerToken,
       feeRecipientToken: ownerAta,
       tokenProgram: TOKEN_PROGRAM_ID,
     });
 
     assert.isNull(await program.account.game.fetchNullable(game));
     assert.equal(
-      (await getAccount(connection, creatorAta)).amount.toString(),
-      (creatorBefore + BigInt(tokenAmount.muln(2).toNumber() - fee)).toString()
+      (await getAccount(connection, winnerToken)).amount.toString(),
+      (winnerBefore + BigInt(tokenAmount.muln(2).toNumber() - fee)).toString()
     );
     assert.equal(
       (await getAccount(connection, ownerAta)).amount.toString(),
@@ -764,7 +857,7 @@ describe("coinflip", () => {
     );
     await program.methods
       .enableToken(mint, new anchor.BN(1_000_000), true, DUMMY_POOL, WSOL_MINT, false)
-      .accounts({ authority: owner.publicKey })
+      .accountsPartial({ authority: owner.publicKey })
       .rpc();
 
     const creatorAta = await createAssociatedTokenAccountIdempotent(
@@ -806,6 +899,127 @@ describe("coinflip", () => {
     assert.equal((await getAccount(connection, creatorAta)).amount.toString(), before.toString());
   });
 
+  it("token vault dust does not block cancel or resolve", async () => {
+    const tokenAmount = new anchor.BN(2_000_000);
+    const dust = 1;
+    const mint = await createMint(connection, owner, owner.publicKey, null, 6);
+    const [tokenConfigPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("token"), mint.toBuffer()],
+      program.programId
+    );
+    await program.methods
+      .enableToken(mint, new anchor.BN(1_000_000), true, DUMMY_POOL, WSOL_MINT, false)
+      .accountsPartial({ authority: owner.publicKey })
+      .rpc();
+
+    const creatorAta = await createAssociatedTokenAccountIdempotent(
+      connection,
+      owner,
+      mint,
+      creator.publicKey
+    );
+    const joinerAta = await createAssociatedTokenAccountIdempotent(
+      connection,
+      owner,
+      mint,
+      joiner.publicKey
+    );
+    const ownerAta = await createAssociatedTokenAccountIdempotent(
+      connection,
+      owner,
+      mint,
+      owner.publicKey
+    );
+    await mintTo(connection, owner, mint, creatorAta, owner, 10_000_000);
+    await mintTo(connection, owner, mint, joinerAta, owner, 10_000_000);
+    await mintTo(connection, owner, mint, ownerAta, owner, 1_000);
+
+    const cancelNonce = nextNonce();
+    const cancelGamePda = gamePdaFor(creator.publicKey, cancelNonce);
+    const cancelVault = getAssociatedTokenAddressSync(mint, cancelGamePda, true);
+    const cancelBefore = (await getAccount(connection, creatorAta)).amount;
+
+    await createGame({
+      creator,
+      amount: tokenAmount,
+      gameNonce: cancelNonce,
+      mint,
+      tokenAccounts: {
+        tokenConfig: tokenConfigPda,
+        mintAccount: mint,
+        creatorToken: creatorAta,
+        vault: cancelVault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+      },
+    });
+    await transfer(connection, owner, ownerAta, cancelVault, owner, dust);
+    await cancelGame(cancelGamePda, creator, {
+      mintAccount: mint,
+      vault: cancelVault,
+      creatorToken: creatorAta,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    });
+    assert.isNull(await program.account.game.fetchNullable(cancelGamePda));
+    assert.equal(
+      (await getAccount(connection, creatorAta)).amount.toString(),
+      (cancelBefore + BigInt(dust)).toString()
+    );
+
+    const creatorEntropy = entropy(91);
+    const gameNonce = nextNonce();
+    const game = gamePdaFor(creator.publicKey, gameNonce);
+    const vault = getAssociatedTokenAddressSync(mint, game, true);
+
+    await createGame({
+      creator,
+      amount: tokenAmount,
+      creatorEntropy,
+      gameNonce,
+      mint,
+      tokenAccounts: {
+        tokenConfig: tokenConfigPda,
+        mintAccount: mint,
+        creatorToken: creatorAta,
+        vault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+      },
+    });
+    const joinerEntropy = entropy(11);
+    await joinGame({
+      game,
+      joiner,
+      joinerSide: { tails: {} },
+      joinerEntropy,
+      amount: tokenAmount,
+      tokenAccounts: {
+        mintAccount: mint,
+        joinerToken: joinerAta,
+        vault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      },
+    });
+    await transfer(connection, owner, ownerAta, vault, owner, dust);
+
+    const fee = potFee(tokenAmount);
+    const winner = await winnerForGame(game);
+    const winnerToken = winner.equals(creator.publicKey) ? creatorAta : joinerAta;
+    const winnerBefore = (await getAccount(connection, winnerToken)).amount;
+    await resolveGame(game, winner, {
+      mintAccount: mint,
+      vault,
+      winnerToken,
+      feeRecipientToken: ownerAta,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    });
+    assert.isNull(await program.account.game.fetchNullable(game));
+    assert.equal(
+      (await getAccount(connection, winnerToken)).amount.toString(),
+      (winnerBefore + BigInt(tokenAmount.muln(2).toNumber() - fee + dust)).toString()
+    );
+  });
+
   it("rejects token games that are disabled or below the minimum", async () => {
     await expectError(
       () => createGame({ creator, mint: Keypair.generate().publicKey }),
@@ -827,7 +1041,7 @@ describe("coinflip", () => {
 
     await program.methods
       .enableToken(mint, new anchor.BN(5_000_000), true, DUMMY_POOL, WSOL_MINT, false)
-      .accounts({ authority: owner.publicKey })
+      .accountsPartial({ authority: owner.publicKey })
       .rpc();
 
     const gameNonce = nextNonce();
@@ -855,11 +1069,69 @@ describe("coinflip", () => {
     );
   });
 
+  it("rejects SOL games below the configured minimum and lets the owner change it for new games only", async () => {
+    await expectError(
+      () =>
+        createGame({
+          creator,
+          amount: new anchor.BN(1_000_000),
+        }),
+      "AmountBelowMinimum"
+    );
+
+    const open = await createGame({ creator });
+
+    const raised = new anchor.BN(100_000_000);
+    await program.methods
+      .setSolMinAmount(raised)
+      .accountsPartial({ authority: owner.publicKey })
+      .rpc();
+
+    let config = await program.account.config.fetch(configPda);
+    assert.equal(config.solMinAmount.toString(), raised.toString());
+
+    await joinGame({ game: open.game, joiner });
+    const joined = await program.account.game.fetch(open.game);
+    assert.equal(joined.amount.toString(), AMOUNT.toString());
+
+    await expectError(
+      () => createGame({ creator, amount: AMOUNT }),
+      "AmountBelowMinimum"
+    );
+
+    const above = await createGame({ creator, amount: raised });
+    assert.equal((await program.account.game.fetch(above.game)).amount.toString(), raised.toString());
+    await cancelGame(above.game, creator);
+
+    await expectError(
+      () =>
+        program.methods
+          .setSolMinAmount(raised)
+          .accountsPartial({ authority: creator.publicKey })
+          .signers([creator])
+          .rpc(),
+      "Unauthorized"
+    );
+    await expectError(
+      () =>
+        program.methods
+          .setSolMinAmount(new anchor.BN(0))
+          .accountsPartial({ authority: owner.publicKey })
+          .rpc(),
+      "InvalidMinAmount"
+    );
+
+    await program.methods
+      .setSolMinAmount(new anchor.BN(10_000_000))
+      .accountsPartial({ authority: owner.publicKey })
+      .rpc();
+  });
+
   it("owner can set the SOL-USDC pool", async () => {
     const usdc = Keypair.generate().publicKey;
     await program.methods
       .setSolUsdcPool(usdc, DUMMY_POOL)
-      .accounts({ authority: owner.publicKey })
+      .accountsPartial({ authority: owner.publicKey })
       .rpc();
 
     const config = await program.account.config.fetch(configPda);
@@ -870,7 +1142,7 @@ describe("coinflip", () => {
       () =>
         program.methods
           .setSolUsdcPool(usdc, DUMMY_POOL)
-          .accounts({ authority: creator.publicKey })
+          .accountsPartial({ authority: creator.publicKey })
           .signers([creator])
           .rpc(),
       "Unauthorized"
@@ -879,7 +1151,6 @@ describe("coinflip", () => {
 
   it("participate joins a SOL game with the same mint", async () => {
     const { game } = await createGame({ creator });
-    await commitGame(game);
 
     await program.methods
       .participate(
@@ -891,7 +1162,7 @@ describe("coinflip", () => {
         new anchor.BN(0),
         0
       )
-      .accounts({
+      .accountsPartial({
         game,
         joiner: joiner.publicKey,
         gameTokenConfig: null,
@@ -903,6 +1174,10 @@ describe("coinflip", () => {
         tokenProgram: null,
         associatedTokenProgram: null,
         raydiumProgram: null,
+        vrfProgram: MOCK_VRF_ID,
+        vrfNetwork: vrfNetworkPda(),
+        vrfTreasury: owner.publicKey,
+        vrfRequest: vrfRequestPda(game),
       })
       .signers([joiner])
       .rpc();
@@ -921,7 +1196,7 @@ describe("coinflip", () => {
     );
     await program.methods
       .enableToken(mint, new anchor.BN(1_000_000), true, DUMMY_POOL, WSOL_MINT, false)
-      .accounts({ authority: owner.publicKey })
+      .accountsPartial({ authority: owner.publicKey })
       .rpc();
 
     const creatorAta = await createAssociatedTokenAccountIdempotent(
@@ -957,7 +1232,6 @@ describe("coinflip", () => {
         associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
       },
     });
-    await commitGame(game);
 
     await program.methods
       .participate(
@@ -969,7 +1243,7 @@ describe("coinflip", () => {
         new anchor.BN(0),
         0
       )
-      .accounts({
+      .accountsPartial({
         game,
         joiner: joiner.publicKey,
         gameTokenConfig: tokenConfigPda,
@@ -981,6 +1255,10 @@ describe("coinflip", () => {
         tokenProgram: TOKEN_PROGRAM_ID,
         associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
         raydiumProgram: null,
+        vrfProgram: MOCK_VRF_ID,
+        vrfNetwork: vrfNetworkPda(),
+        vrfTreasury: owner.publicKey,
+        vrfRequest: vrfRequestPda(game),
       })
       .signers([joiner])
       .rpc();
@@ -999,7 +1277,7 @@ describe("coinflip", () => {
     );
     await program.methods
       .enableToken(mint, new anchor.BN(1_000_000), true, DUMMY_POOL, WSOL_MINT, true)
-      .accounts({ authority: owner.publicKey })
+      .accountsPartial({ authority: owner.publicKey })
       .rpc();
 
     const creatorAta = await createAssociatedTokenAccountIdempotent(
@@ -1028,7 +1306,6 @@ describe("coinflip", () => {
         associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
       },
     });
-    await commitGame(game);
 
     await expectError(
       () =>
@@ -1042,7 +1319,7 @@ describe("coinflip", () => {
             new anchor.BN(0),
             0
           )
-          .accounts({
+          .accountsPartial({
             game,
             joiner: joiner.publicKey,
             gameTokenConfig: tokenConfigPda,
@@ -1054,6 +1331,10 @@ describe("coinflip", () => {
             tokenProgram: TOKEN_PROGRAM_ID,
             associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
             raydiumProgram: null,
+            vrfProgram: MOCK_VRF_ID,
+            vrfNetwork: vrfNetworkPda(),
+            vrfTreasury: owner.publicKey,
+            vrfRequest: vrfRequestPda(game),
           })
           .signers([joiner])
           .rpc(),
@@ -1063,7 +1344,6 @@ describe("coinflip", () => {
 
   it("participate rejects a pay mint that cannot route into the game", async () => {
     const { game } = await createGame({ creator });
-    await commitGame(game);
     const otherMint = Keypair.generate().publicKey;
 
     await expectError(
@@ -1078,7 +1358,7 @@ describe("coinflip", () => {
             new anchor.BN(0),
             0
           )
-          .accounts({
+          .accountsPartial({
             game,
             joiner: joiner.publicKey,
             gameTokenConfig: null,
@@ -1090,6 +1370,10 @@ describe("coinflip", () => {
             tokenProgram: null,
             associatedTokenProgram: null,
             raydiumProgram: null,
+            vrfProgram: MOCK_VRF_ID,
+            vrfNetwork: vrfNetworkPda(),
+            vrfTreasury: owner.publicKey,
+            vrfRequest: vrfRequestPda(game),
           })
           .signers([joiner])
           .rpc(),

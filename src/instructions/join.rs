@@ -2,6 +2,7 @@ use crate::errors::CoinflipError;
 use crate::state::{
     require_nonzero_entropy, Config, Game, GameStatus, Side, CONFIG_SEED, GAME_SEED,
 };
+use crate::vrf::{request_randomness, vrf_seed};
 use crate::token_utils::{require_token_program, require_vault_ata, transfer_tokens};
 use anchor_lang::prelude::*;
 use anchor_lang::system_program::{transfer, Transfer};
@@ -40,6 +41,17 @@ pub struct Join<'info> {
     )]
     pub joiner: Signer<'info>,
     pub system_program: Program<'info, System>,
+    /// CHECK: ORAO (or configured) VRF program
+    pub vrf_program: UncheckedAccount<'info>,
+    /// CHECK: VRF network state PDA
+    #[account(mut)]
+    pub vrf_network: UncheckedAccount<'info>,
+    /// CHECK: VRF treasury
+    #[account(mut)]
+    pub vrf_treasury: UncheckedAccount<'info>,
+    /// CHECK: VRF request PDA for this game
+    #[account(mut)]
+    pub vrf_request: UncheckedAccount<'info>,
 }
 
 pub fn handler(
@@ -68,7 +80,7 @@ pub fn handler(
             ),
             amount,
         )?;
-        return Ok(());
+        return request_join_vrf(&ctx);
     }
 
     let mint_account = ctx
@@ -105,7 +117,22 @@ pub fn handler(
         decimals,
     )?;
 
+    request_join_vrf(&ctx)?;
     Ok(())
+}
+
+fn request_join_vrf(ctx: &Context<Join>) -> Result<()> {
+    let game = ctx.accounts.game.key();
+    request_randomness(
+        &ctx.accounts.vrf_program.to_account_info(),
+        &ctx.accounts.joiner.to_account_info(),
+        &ctx.accounts.vrf_network.to_account_info(),
+        &ctx.accounts.vrf_treasury.to_account_info(),
+        &ctx.accounts.vrf_request.to_account_info(),
+        &ctx.accounts.system_program.to_account_info(),
+        &ctx.accounts.config.vrf_program,
+        vrf_seed(&game),
+    )
 }
 
 pub fn apply_join(
@@ -116,7 +143,6 @@ pub fn apply_join(
     amount: u64,
 ) -> Result<(Pubkey, u8)> {
     require!(game.status == GameStatus::Open, CoinflipError::AlreadyJoined);
-    require!(game.commit_is_set(), CoinflipError::CommitMissing);
     require!(amount == game.amount, CoinflipError::AmountMismatch);
     require_nonzero_entropy(&joiner_entropy)?;
 
@@ -136,6 +162,7 @@ pub fn apply_join(
 
     game.joiner = joiner;
     game.joiner_entropy = joiner_entropy;
+    game.join_slot = Clock::get()?.slot;
     game.status = GameStatus::Ready;
     Ok((game.mint, game.token_decimals))
 }

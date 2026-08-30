@@ -1,7 +1,7 @@
 use crate::errors::CoinflipError;
 use crate::state::{
     is_native_sol, require_nonzero_entropy, Config, Game, GameStatus, Side, TokenConfig,
-    CONFIG_SEED, GAME_SEED,
+    CONFIG_SEED, GAME_SEED, MAX_FEE_BPS,
 };
 use crate::token_utils::{
     create_ata_if_needed, require_ata_program, require_enabled_token, require_token_program,
@@ -55,10 +55,18 @@ pub fn handler(
     mint: Pubkey,
 ) -> Result<()> {
     require!(!ctx.accounts.config.paused, CoinflipError::Paused);
+    require!(
+        ctx.accounts.config.fee_bps <= MAX_FEE_BPS,
+        CoinflipError::InvalidFeeBps
+    );
     require!(amount > 0, CoinflipError::InvalidAmount);
     require_nonzero_entropy(&creator_entropy)?;
 
     let token_decimals = if is_native_sol(&mint) {
+        require!(
+            amount >= ctx.accounts.config.sol_min_amount,
+            CoinflipError::AmountBelowMinimum
+        );
         0
     } else {
         let token_config = ctx
@@ -89,9 +97,10 @@ pub fn handler(
         game.joiner_side = Side::Open;
         game.creator_entropy = creator_entropy;
         game.joiner_entropy = [0u8; 32];
-        game.commit = [0u8; 32];
         game.status = GameStatus::Open;
         game.nonce = nonce;
+        game.join_slot = 0;
+        game.cancel_after_slot = 0;
         game.bump = ctx.bumps.game;
     }
 

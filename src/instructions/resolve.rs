@@ -1,12 +1,10 @@
 use crate::errors::CoinflipError;
-use crate::state::{
-    pot_fee, Config, Game, GameStatus, Side, CONFIG_SEED, GAME_SEED, RESULT_PREFIX,
-};
+use crate::state::{pot_fee, Config, Game, GameStatus, CONFIG_SEED, GAME_SEED};
 use crate::token_utils::{
     close_vault_from_game, require_token_program, require_vault_ata, transfer_tokens_from_game,
 };
+use crate::vrf::{fulfilled_randomness, result_winner, vrf_seed};
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::hash::hashv;
 use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 
 #[derive(Accounts)]
@@ -43,49 +41,32 @@ pub struct Resolve<'info> {
     )]
     pub fee_recipient_token: Option<Box<InterfaceAccount<'info, TokenAccount>>>,
     pub token_program: Option<Interface<'info, TokenInterface>>,
-    /// CHECK: compared to the computed winner after the reveal is verified
+    /// CHECK: must match the computed winner; owner is not required to be System
     #[account(mut)]
-    pub winner: SystemAccount<'info>,
+    pub winner: UncheckedAccount<'info>,
     /// CHECK: owner receives the snapshotted resolve fee
     #[account(
         mut,
         address = config.authority @ CoinflipError::Unauthorized
     )]
-    pub fee_recipient: SystemAccount<'info>,
-    pub resolver: Signer<'info>,
+    pub fee_recipient: UncheckedAccount<'info>,
+    /// CHECK: anyone may settle once ORAO has fulfilled
+    pub settler: Signer<'info>,
+    /// CHECK: fulfilled ORAO (or configured) randomness account
+    pub vrf_request: UncheckedAccount<'info>,
 }
 
-pub fn handler(ctx: Context<Resolve>, server_entropy: [u8; 32]) -> Result<()> {
-    require_keys_eq!(
-        ctx.accounts.resolver.key(),
-        ctx.accounts.config.resolver,
-        CoinflipError::Unauthorized
-    );
-
+pub fn handler(ctx: Context<Resolve>) -> Result<()> {
     let game = &ctx.accounts.game;
     require!(game.status == GameStatus::Ready, CoinflipError::NotReady);
-    require!(game.commit_is_set(), CoinflipError::CommitMissing);
 
-    let expected_commit = hashv(&[server_entropy.as_ref(), game.key().as_ref()]);
-    require!(
-        expected_commit.to_bytes() == game.commit,
-        CoinflipError::BadReveal
-    );
-
-    let result_hash = hashv(&[
-        RESULT_PREFIX,
-        &game.creator_entropy,
-        &game.joiner_entropy,
-        &server_entropy,
-    ]);
-    let result_bit = result_hash.to_bytes()[0] & 1;
-    let winning_side = Side::from_result_bit(result_bit);
-
-    let expected_winner = if game.creator_side == winning_side {
-        game.creator
-    } else {
-        game.joiner
-    };
+    let seed = vrf_seed(&game.key());
+    let randomness = fulfilled_randomness(
+        &ctx.accounts.vrf_request.to_account_info(),
+        &ctx.accounts.config.vrf_program,
+        &seed,
+    )?;
+    let expected_winner = result_winner(game, &randomness);
     require_keys_eq!(
         ctx.accounts.winner.key(),
         expected_winner,
@@ -142,7 +123,9 @@ pub fn handler(ctx: Context<Resolve>, server_entropy: [u8; 32]) -> Result<()> {
         .amount
         .checked_mul(2)
         .ok_or(CoinflipError::ArithmeticOverflow)?;
-    let winner_amount = pot
+    let vault_balance = vault.amount;
+    require!(vault_balance >= pot, CoinflipError::TokenAccountMismatch);
+    let winner_amount = vault_balance
         .checked_sub(fee)
         .ok_or(CoinflipError::ArithmeticOverflow)?;
     let creator = game.creator;

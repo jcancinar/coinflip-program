@@ -1,5 +1,7 @@
 use crate::errors::CoinflipError;
-use crate::state::{Config, Game, GameStatus, CONFIG_SEED, GAME_SEED};
+use crate::state::{
+    Config, Game, GameStatus, AUTHORITY_CANCEL_DELAY_SLOTS, CONFIG_SEED, GAME_SEED,
+};
 use crate::token_utils::{
     close_vault_from_game, require_token_program, require_vault_ata, transfer_tokens_from_game,
 };
@@ -35,10 +37,43 @@ pub struct Cancel<'info> {
     )]
     pub creator_token: Option<Box<InterfaceAccount<'info, TokenAccount>>>,
     pub token_program: Option<Interface<'info, TokenInterface>>,
-    /// CHECK: refund destination; must be the game creator
+    /// CHECK: refund destination; constrained to game.creator above
     #[account(mut)]
-    pub creator: SystemAccount<'info>,
+    pub creator: UncheckedAccount<'info>,
     pub signer: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct InitiateCancel<'info> {
+    #[account(
+        seeds = [CONFIG_SEED],
+        bump = config.bump
+    )]
+    pub config: Account<'info, Config>,
+    #[account(
+        mut,
+        seeds = [GAME_SEED, game.creator.as_ref(), &game.nonce.to_le_bytes()],
+        bump = game.bump
+    )]
+    pub game: Account<'info, Game>,
+    pub authority: Signer<'info>,
+}
+
+pub fn initiate(ctx: Context<InitiateCancel>) -> Result<()> {
+    require_keys_eq!(
+        ctx.accounts.authority.key(),
+        ctx.accounts.config.authority,
+        CoinflipError::Unauthorized
+    );
+    require!(
+        ctx.accounts.game.status == GameStatus::Open,
+        CoinflipError::CancelNotAllowed
+    );
+    let now = Clock::get()?.slot;
+    ctx.accounts.game.cancel_after_slot = now
+        .checked_add(AUTHORITY_CANCEL_DELAY_SLOTS)
+        .ok_or(CoinflipError::ArithmeticOverflow)?;
+    Ok(())
 }
 
 pub fn handler(ctx: Context<Cancel>) -> Result<()> {
@@ -48,10 +83,20 @@ pub fn handler(ctx: Context<Cancel>) -> Result<()> {
     );
 
     let signer = ctx.accounts.signer.key();
-    require!(
-        signer == ctx.accounts.game.creator || signer == ctx.accounts.config.authority,
-        CoinflipError::Unauthorized
-    );
+    let creator = ctx.accounts.game.creator;
+    let authority = ctx.accounts.config.authority;
+    require!(signer == creator || signer == authority, CoinflipError::Unauthorized);
+
+    if signer == authority && signer != creator {
+        require!(
+            ctx.accounts.game.cancel_after_slot > 0,
+            CoinflipError::AuthorityCancelNotInitiated
+        );
+        require!(
+            Clock::get()?.slot >= ctx.accounts.game.cancel_after_slot,
+            CoinflipError::AuthorityCancelNotReady
+        );
+    }
 
     if ctx.accounts.game.is_native_sol() {
         return Ok(());
@@ -82,7 +127,8 @@ pub fn handler(ctx: Context<Cancel>) -> Result<()> {
         &token_program.key(),
     )?;
 
-    let amount = game.amount;
+    let vault_balance = vault.amount;
+    require!(vault_balance >= game.amount, CoinflipError::TokenAccountMismatch);
     let creator = game.creator;
     let nonce = game.nonce;
     let bump = game.bump;
@@ -97,7 +143,7 @@ pub fn handler(ctx: Context<Cancel>) -> Result<()> {
         &creator,
         nonce,
         bump,
-        amount,
+        vault_balance,
         decimals,
     )?;
     close_vault_from_game(

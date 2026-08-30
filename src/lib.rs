@@ -3,8 +3,10 @@ use anchor_lang::prelude::*;
 pub mod errors;
 pub mod instructions;
 pub mod state;
+pub mod slot_hash;
 pub mod swap;
 pub mod token_utils;
+pub mod vrf;
 
 use instructions::*;
 use state::*;
@@ -21,6 +23,10 @@ pub mod coinflip {
 
     pub fn set_resolver(ctx: Context<SetResolver>, resolver: Pubkey) -> Result<()> {
         instructions::admin::set_resolver(ctx, resolver)
+    }
+
+    pub fn set_authority(ctx: Context<SetAuthority>, authority: Pubkey) -> Result<()> {
+        instructions::admin::set_authority(ctx, authority)
     }
 
     pub fn set_paused(ctx: Context<SetPaused>, paused: bool) -> Result<()> {
@@ -59,6 +65,14 @@ pub mod coinflip {
         instructions::admin::set_sol_usdc_pool(ctx, usdc_mint, pool)
     }
 
+    pub fn set_sol_min_amount(ctx: Context<SetSolMinAmount>, sol_min_amount: u64) -> Result<()> {
+        instructions::admin::set_sol_min_amount(ctx, sol_min_amount)
+    }
+
+    pub fn set_vrf_program(ctx: Context<SetVrfProgram>, vrf_program: Pubkey) -> Result<()> {
+        instructions::admin::set_vrf_program(ctx, vrf_program)
+    }
+
     pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {
         instructions::admin::migrate_config(ctx)
     }
@@ -76,10 +90,6 @@ pub mod coinflip {
         mint: Pubkey,
     ) -> Result<()> {
         instructions::create::handler(ctx, amount, side, creator_entropy, nonce, mint)
-    }
-
-    pub fn commit_resolve(ctx: Context<CommitResolve>, commit: [u8; 32]) -> Result<()> {
-        instructions::commit_resolve::handler(ctx, commit)
     }
 
     pub fn join(
@@ -113,8 +123,16 @@ pub mod coinflip {
         )
     }
 
-    pub fn resolve(ctx: Context<Resolve>, server_entropy: [u8; 32]) -> Result<()> {
-        instructions::resolve::handler(ctx, server_entropy)
+    pub fn resolve(ctx: Context<Resolve>) -> Result<()> {
+        instructions::resolve::handler(ctx)
+    }
+
+    pub fn refund_expired(ctx: Context<RefundExpired>) -> Result<()> {
+        instructions::refund::handler(ctx)
+    }
+
+    pub fn initiate_cancel(ctx: Context<InitiateCancel>) -> Result<()> {
+        instructions::cancel::initiate(ctx)
     }
 
     pub fn cancel(ctx: Context<Cancel>) -> Result<()> {

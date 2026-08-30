@@ -22,6 +22,7 @@ anchor-spl = "0.31.1"
 
 [workspace]
 resolver = "2"
+members = [".", "mock-vrf"]
 
 [profile.release]
 overflow-checks = true

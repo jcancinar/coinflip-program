@@ -6,6 +6,13 @@ pub const TOKEN_SEED: &[u8] = b"token";
 pub const RESULT_PREFIX: &[u8] = b"coinflip_p2p_v1";
 pub const BPS_DENOMINATOR: u16 = 10_000;
 pub const DEFAULT_FEE_BPS: u16 = 350;
+/// 5% of pot. Snapshotted onto each game at create; changing this does not affect open games.
+pub const MAX_FEE_BPS: u16 = 500;
+/// 0.01 SOL. Admin can raise or lower this for new games via `set_sol_min_amount`.
+pub const DEFAULT_SOL_MIN_AMOUNT: u64 = 10_000_000;
+/// Authority must wait this many slots after `initiate_cancel` before `cancel`.
+/// ~10s at 300ms slots. Join can still land during the delay.
+pub const AUTHORITY_CANCEL_DELAY_SLOTS: u64 = 32;
 
 pub const WSOL_MINT: Pubkey = pubkey!("So11111111111111111111111111111111111111112");
 pub const RAYDIUM_CLMM: Pubkey = pubkey!("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
@@ -24,6 +31,8 @@ pub struct Config {
     pub bump: u8,
     pub usdc_mint: Pubkey,
     pub sol_usdc_pool: Pubkey,
+    pub sol_min_amount: u64,
+    pub vrf_program: Pubkey,
 }
 
 #[account]
@@ -51,17 +60,15 @@ pub struct Game {
     pub joiner_side: Side,
     pub creator_entropy: [u8; 32],
     pub joiner_entropy: [u8; 32],
-    pub commit: [u8; 32],
     pub status: GameStatus,
     pub nonce: u64,
     pub bump: u8,
+    pub join_slot: u64,
+    /// Earliest slot the authority may cancel. 0 = not initiated.
+    pub cancel_after_slot: u64,
 }
 
 impl Game {
-    pub fn commit_is_set(&self) -> bool {
-        self.commit != [0u8; 32]
-    }
-
     pub fn is_native_sol(&self) -> bool {
         is_native_sol(&self.mint)
     }

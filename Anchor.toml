@@ -7,6 +7,7 @@ skip-lint = false
 
 [programs.localnet]
 coinflip = "sc6TuL2w5UWBM9ygRZbH1MVjc7oLHZTgv1mg3Q1c21E"
+mock_vrf = "8DeY7XokDSxSC5nJjwuoYW8Ajjo36UH9XXpu247tcJWf"
 
 [programs.devnet]
 coinflip = "sc6TuL2w5UWBM9ygRZbH1MVjc7oLHZTgv1mg3Q1c21E"
@@ -19,7 +20,7 @@ cluster = "Localnet"
 wallet = "~/.config/solana/id.json"
 
 [workspace]
-members = ["."]
+members = [".", "mock-vrf"]
 
 [scripts]
-test = "npx ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
+test = "mkdir -p target/deploy && cp mock-vrf/keypair.json target/deploy/mock_vrf-keypair.json && npx ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
