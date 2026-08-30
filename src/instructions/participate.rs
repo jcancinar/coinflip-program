@@ -144,7 +144,8 @@ pub fn handler<'info>(
 fn request_join_vrf<'info>(
     ctx: &Context<'_, '_, 'info, 'info, Participate<'info>>,
 ) -> Result<()> {
-    let game = ctx.accounts.game.key();
+    let game_key = ctx.accounts.game.key();
+    let game = &ctx.accounts.game;
     request_randomness(
         &ctx.accounts.vrf_program.to_account_info(),
         &ctx.accounts.joiner.to_account_info(),
@@ -153,7 +154,7 @@ fn request_join_vrf<'info>(
         &ctx.accounts.vrf_request.to_account_info(),
         &ctx.accounts.system_program.to_account_info(),
         &ctx.accounts.config.vrf_program,
-        vrf_seed(&game),
+        vrf_seed(&game_key, &game.joiner, &game.joiner_entropy),
     )
 }
 

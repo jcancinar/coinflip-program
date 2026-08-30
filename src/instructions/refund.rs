@@ -1,6 +1,6 @@
 use crate::errors::CoinflipError;
 use crate::slot_hash::{lookup_join_slot_hash, SlotHashLookup};
-use crate::vrf::{is_fulfilled, vrf_seed};
+use crate::vrf::{is_request_fulfilled, randomness_address, vrf_seed};
 use crate::state::{Config, Game, GameStatus, CONFIG_SEED, GAME_SEED};
 use crate::token_utils::{
     close_vault_from_game, require_token_program, require_vault_ata, transfer_tokens_from_game,
@@ -53,7 +53,15 @@ pub struct RefundExpired<'info> {
     /// CHECK: SlotHashes sysvar
     #[account(address = SLOT_HASHES_ID)]
     pub slot_hashes: UncheckedAccount<'info>,
-    /// CHECK: VRF request; refund is rejected if already fulfilled
+    /// CHECK: must be this game's VRF request PDA; refund is rejected if fulfilled
+    #[account(
+        constraint = vrf_request.key()
+            == randomness_address(
+                &config.vrf_program,
+                &vrf_seed(&game.key(), &game.joiner, &game.joiner_entropy)
+            )
+            @ CoinflipError::InvalidVrfAccounts
+    )]
     pub vrf_request: UncheckedAccount<'info>,
 }
 
@@ -61,13 +69,13 @@ pub fn handler(ctx: Context<RefundExpired>) -> Result<()> {
     let game = &ctx.accounts.game;
     require!(game.status == GameStatus::Ready, CoinflipError::NotReady);
     require!(game.join_slot > 0, CoinflipError::NotReady);
-    let seed = vrf_seed(&game.key());
+    let seed = vrf_seed(&game.key(), &game.joiner, &game.joiner_entropy);
     require!(
-        !is_fulfilled(
+        !is_request_fulfilled(
             &ctx.accounts.vrf_request.to_account_info(),
             &ctx.accounts.config.vrf_program,
             &seed
-        ),
+        )?,
         CoinflipError::CancelNotAllowed
     );
     match lookup_join_slot_hash(&ctx.accounts.slot_hashes.to_account_info(), game.join_slot)? {

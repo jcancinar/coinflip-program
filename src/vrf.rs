@@ -10,10 +10,11 @@ use anchor_lang::solana_program::{
 pub const ORAO_VRF_ID: Pubkey = pubkey!("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y");
 pub const RANDOMNESS_ACCOUNT_SEED: &[u8] = b"orao-vrf-randomness-request";
 pub const CONFIG_ACCOUNT_SEED: &[u8] = b"orao-vrf-network-configuration";
+pub const VRF_SEED_PREFIX: &[u8] = b"coinflip_vrf_seed_v1";
 const REQUEST_V2_DISCRIMINATOR: [u8; 8] = [38, 151, 209, 6, 195, 102, 28, 217];
 
-pub fn vrf_seed(game: &Pubkey) -> [u8; 32] {
-    game.to_bytes()
+pub fn vrf_seed(game: &Pubkey, joiner: &Pubkey, joiner_entropy: &[u8; 32]) -> [u8; 32] {
+    hashv(&[VRF_SEED_PREFIX, game.as_ref(), joiner.as_ref(), joiner_entropy]).to_bytes()
 }
 
 pub fn randomness_address(vrf_program: &Pubkey, seed: &[u8; 32]) -> Pubkey {
@@ -60,6 +61,13 @@ pub fn request_randomness<'info>(
         randomness_address(expected_vrf, &seed),
         CoinflipError::InvalidVrfAccounts
     );
+    if request.owner == expected_vrf {
+        require!(
+            !is_request_fulfilled(request, expected_vrf, &seed)?,
+            CoinflipError::InvalidVrfAccounts
+        );
+        return Ok(());
+    }
 
     let mut data = REQUEST_V2_DISCRIMINATOR.to_vec();
     data.extend_from_slice(&seed);
@@ -89,12 +97,12 @@ pub fn request_randomness<'info>(
 
 /// RandomnessV2: 8-byte disc, then RequestAccount tag (1 = Fulfilled), client, seed, [u8;64].
 pub fn fulfilled_randomness(request: &AccountInfo, vrf_program: &Pubkey, seed: &[u8; 32]) -> Result<[u8; 64]> {
-    require_keys_eq!(*request.owner, *vrf_program, CoinflipError::VrfNotFulfilled);
     require_keys_eq!(
         *request.key,
         randomness_address(vrf_program, seed),
         CoinflipError::InvalidVrfAccounts
     );
+    require_keys_eq!(*request.owner, *vrf_program, CoinflipError::VrfNotFulfilled);
     let data = request.try_borrow_data()?;
     require!(data.len() >= 73 + 64, CoinflipError::VrfNotFulfilled);
     require!(data[8] == 1, CoinflipError::VrfNotFulfilled);
@@ -103,6 +111,25 @@ pub fn fulfilled_randomness(request: &AccountInfo, vrf_program: &Pubkey, seed: &
     Ok(data[73..137].try_into().unwrap())
 }
 
-pub fn is_fulfilled(request: &AccountInfo, vrf_program: &Pubkey, seed: &[u8; 32]) -> bool {
-    fulfilled_randomness(request, vrf_program, seed).is_ok()
+/// Wrong request account is an error, not "unfulfilled". Missing or pending is `Ok(false)`.
+pub fn is_request_fulfilled(
+    request: &AccountInfo,
+    vrf_program: &Pubkey,
+    seed: &[u8; 32],
+) -> Result<bool> {
+    require_keys_eq!(
+        *request.key,
+        randomness_address(vrf_program, seed),
+        CoinflipError::InvalidVrfAccounts
+    );
+    if request.owner != vrf_program {
+        return Ok(false);
+    }
+    let data = request.try_borrow_data()?;
+    if data.len() < 137 || data[8] != 1 {
+        return Ok(false);
+    }
+    let stored_seed: [u8; 32] = data[41..73].try_into().unwrap();
+    require!(stored_seed == *seed, CoinflipError::InvalidVrfAccounts);
+    Ok(true)
 }

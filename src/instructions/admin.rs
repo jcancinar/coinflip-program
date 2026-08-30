@@ -6,18 +6,6 @@ use crate::vrf::ORAO_VRF_ID;
 use anchor_lang::prelude::*;
 
 #[derive(Accounts)]
-pub struct SetResolver<'info> {
-    #[account(
-        mut,
-        seeds = [CONFIG_SEED],
-        bump = config.bump,
-        has_one = authority @ CoinflipError::Unauthorized
-    )]
-    pub config: Account<'info, Config>,
-    pub authority: Signer<'info>,
-}
-
-#[derive(Accounts)]
 pub struct SetPaused<'info> {
     #[account(
         mut,
@@ -27,11 +15,6 @@ pub struct SetPaused<'info> {
     )]
     pub config: Account<'info, Config>,
     pub authority: Signer<'info>,
-}
-
-pub fn set_resolver(ctx: Context<SetResolver>, resolver: Pubkey) -> Result<()> {
-    ctx.accounts.config.resolver = resolver;
-    Ok(())
 }
 
 #[derive(Accounts)]
@@ -165,24 +148,6 @@ pub struct SetSolMinAmount<'info> {
 pub fn set_sol_min_amount(ctx: Context<SetSolMinAmount>, sol_min_amount: u64) -> Result<()> {
     require!(sol_min_amount > 0, CoinflipError::InvalidMinAmount);
     ctx.accounts.config.sol_min_amount = sol_min_amount;
-    Ok(())
-}
-
-#[derive(Accounts)]
-pub struct SetVrfProgram<'info> {
-    #[account(
-        mut,
-        seeds = [CONFIG_SEED],
-        bump = config.bump,
-        has_one = authority @ CoinflipError::Unauthorized
-    )]
-    pub config: Account<'info, Config>,
-    pub authority: Signer<'info>,
-}
-
-pub fn set_vrf_program(ctx: Context<SetVrfProgram>, vrf_program: Pubkey) -> Result<()> {
-    require!(vrf_program != Pubkey::default(), CoinflipError::InvalidVrfProgram);
-    ctx.accounts.config.vrf_program = vrf_program;
     Ok(())
 }
 

@@ -17,12 +17,8 @@ declare_id!("sc6TuL2w5UWBM9ygRZbH1MVjc7oLHZTgv1mg3Q1c21E");
 pub mod coinflip {
     use super::*;
 
-    pub fn initialize(ctx: Context<Initialize>, resolver: Pubkey) -> Result<()> {
-        instructions::initialize::handler(ctx, resolver)
-    }
-
-    pub fn set_resolver(ctx: Context<SetResolver>, resolver: Pubkey) -> Result<()> {
-        instructions::admin::set_resolver(ctx, resolver)
+    pub fn initialize(ctx: Context<Initialize>, vrf_program: Pubkey) -> Result<()> {
+        instructions::initialize::handler(ctx, vrf_program)
     }
 
     pub fn set_authority(ctx: Context<SetAuthority>, authority: Pubkey) -> Result<()> {
@@ -67,10 +63,6 @@ pub mod coinflip {
 
     pub fn set_sol_min_amount(ctx: Context<SetSolMinAmount>, sol_min_amount: u64) -> Result<()> {
         instructions::admin::set_sol_min_amount(ctx, sol_min_amount)
-    }
-
-    pub fn set_vrf_program(ctx: Context<SetVrfProgram>, vrf_program: Pubkey) -> Result<()> {
-        instructions::admin::set_vrf_program(ctx, vrf_program)
     }
 
     pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {

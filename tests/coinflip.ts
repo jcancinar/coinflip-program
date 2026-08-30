@@ -1,7 +1,7 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { Coinflip } from "../target/types/coinflip";
-import { Keypair, LAMPORTS_PER_SOL, PublicKey, SYSVAR_SLOT_HASHES_PUBKEY } from "@solana/web3.js";
+import { Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, SYSVAR_SLOT_HASHES_PUBKEY } from "@solana/web3.js";
 import { MockVrf } from "../target/types/mock_vrf";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -17,6 +17,7 @@ import { createHash } from "crypto";
 import { assert, expect } from "chai";
 
 const RESULT_PREFIX = Buffer.from("coinflip_p2p_v1");
+const VRF_SEED_PREFIX = Buffer.from("coinflip_vrf_seed_v1");
 const MOCK_VRF_PREFIX = Buffer.from("coinflip_mock_vrf");
 const MOCK_VRF_ID = new PublicKey("8DeY7XokDSxSC5nJjwuoYW8Ajjo36UH9XXpu247tcJWf");
 const AMOUNT = new anchor.BN(50_000_000);
@@ -47,13 +48,17 @@ function resultBit(
   return sha256(RESULT_PREFIX, creatorEntropy, joinerEntropy, vrfFirst32)[0] & 1;
 }
 
-function mockVrfFirst32(game: PublicKey): Buffer {
-  return sha256(MOCK_VRF_PREFIX, game.toBuffer());
+function vrfSeed(game: PublicKey, joiner: PublicKey, joinerEntropy: Buffer): Buffer {
+  return sha256(VRF_SEED_PREFIX, game.toBuffer(), joiner.toBuffer(), joinerEntropy);
 }
 
-function vrfRequestPda(game: PublicKey): PublicKey {
+function mockVrfFirst32(game: PublicKey, joiner: PublicKey, joinerEntropy: Buffer): Buffer {
+  return sha256(MOCK_VRF_PREFIX, vrfSeed(game, joiner, joinerEntropy));
+}
+
+function vrfRequestPda(game: PublicKey, joiner: PublicKey, joinerEntropy: Buffer): PublicKey {
   return PublicKey.findProgramAddressSync(
-    [Buffer.from("orao-vrf-randomness-request"), game.toBuffer()],
+    [Buffer.from("orao-vrf-randomness-request"), vrfSeed(game, joiner, joinerEntropy)],
     MOCK_VRF_ID
   )[0];
 }
@@ -80,7 +85,6 @@ describe("coinflip", () => {
   const connection = provider.connection;
   const owner = (provider.wallet as anchor.Wallet).payer;
 
-  const resolver = Keypair.generate();
   const creator = Keypair.generate();
   const joiner = Keypair.generate();
 
@@ -177,7 +181,7 @@ describe("coinflip", () => {
         vrfProgram: MOCK_VRF_ID,
         vrfNetwork: vrfNetworkPda(),
         vrfTreasury: owner.publicKey,
-        vrfRequest: vrfRequestPda(params.game),
+        vrfRequest: vrfRequestPda(params.game, params.joiner.publicKey, joinerEntropy),
         ...(params.tokenAccounts ?? {}),
       })
       .signers([params.joiner])
@@ -242,17 +246,26 @@ describe("coinflip", () => {
         winnerToken: null,
         feeRecipientToken: null,
         tokenProgram: null,
-        vrfRequest: vrfRequestPda(game),
+        vrfRequest: await vrfRequestPdaFromGame(game),
         ...(tokenAccounts ?? {}),
       })
       .rpc();
+  }
+
+  async function vrfRequestPdaFromGame(game: PublicKey): Promise<PublicKey> {
+    const state = await program.account.game.fetch(game);
+    return vrfRequestPda(game, state.joiner, Buffer.from(state.joinerEntropy));
   }
 
   async function winnerForGame(game: PublicKey): Promise<PublicKey> {
     const state = await program.account.game.fetch(game);
     const creatorEntropy = Buffer.from(state.creatorEntropy);
     const joinerEntropy = Buffer.from(state.joinerEntropy);
-    const bit = resultBit(creatorEntropy, joinerEntropy, mockVrfFirst32(game));
+    const bit = resultBit(
+      creatorEntropy,
+      joinerEntropy,
+      mockVrfFirst32(game, state.joiner, joinerEntropy)
+    );
     const creatorSide = "heads" in state.creatorSide ? 1 : 0;
     return bit === creatorSide ? state.creator : state.joiner;
   }
@@ -287,13 +300,13 @@ describe("coinflip", () => {
   }
 
   before(async () => {
-    for (const kp of [resolver, creator, joiner]) {
+    for (const kp of [creator, joiner]) {
       const sig = await connection.requestAirdrop(kp.publicKey, 10 * LAMPORTS_PER_SOL);
       await connection.confirmTransaction(sig, "confirmed");
     }
 
     await program.methods
-      .initialize(resolver.publicKey)
+      .initialize(MOCK_VRF_ID)
       .accountsPartial({
         authority: owner.publicKey,
       })
@@ -304,14 +317,10 @@ describe("coinflip", () => {
       .accountsPartial({ payer: owner.publicKey })
       .rpc();
 
-    await program.methods
-      .setVrfProgram(MOCK_VRF_ID)
-      .accountsPartial({ authority: owner.publicKey })
-      .rpc();
-
     const config = await program.account.config.fetch(configPda);
     assert.equal(config.authority.toBase58(), owner.publicKey.toBase58());
-    assert.equal(config.resolver.toBase58(), resolver.publicKey.toBase58());
+    assert.equal(config.resolver.toBase58(), PublicKey.default.toBase58());
+    assert.equal(config.vrfProgram.toBase58(), MOCK_VRF_ID.toBase58());
     assert.equal(config.feeBps, DEFAULT_FEE_BPS);
     assert.isFalse(config.paused);
     assert.equal(config.solMinAmount.toString(), "10000000");
@@ -378,12 +387,68 @@ describe("coinflip", () => {
             joinerToken: null,
             tokenProgram: null,
             slotHashes: SYSVAR_SLOT_HASHES_PUBKEY,
-            vrfRequest: vrfRequestPda(game),
+            vrfRequest: await vrfRequestPdaFromGame(game),
           })
           .rpc(),
       "CancelNotAllowed"
     );
     await expectResolvedPayout({ game });
+  });
+
+  it("rejects refund with a dummy VRF request after fulfill", async () => {
+    const { game } = await createGame({ creator });
+    await joinGame({ game, joiner });
+    await expectError(
+      () =>
+        program.methods
+          .refundExpired()
+          .accountsPartial({
+            game,
+            creator: creator.publicKey,
+            joiner: joiner.publicKey,
+            mintAccount: null,
+            vault: null,
+            creatorToken: null,
+            joinerToken: null,
+            tokenProgram: null,
+            slotHashes: SYSVAR_SLOT_HASHES_PUBKEY,
+            vrfRequest: SystemProgram.programId,
+          })
+          .rpc(),
+      "InvalidVrfAccounts"
+    );
+    await expectResolvedPayout({ game });
+  });
+
+  it("join still works if someone reserved the old game-pubkey VRF seed", async () => {
+    const { game } = await createGame({ creator });
+    await mockVrf.methods
+      .requestV2(Array.from(game.toBuffer()))
+      .accountsPartial({
+        payer: owner.publicKey,
+        treasury: owner.publicKey,
+      })
+      .rpc();
+    await joinGame({ game, joiner });
+    await expectResolvedPayout({ game });
+  });
+
+  it("rejects join when the joiner's VRF request is already fulfilled", async () => {
+    const { game } = await createGame({ creator });
+    const joinerEntropy = entropy(11);
+    await mockVrf.methods
+      .requestV2(Array.from(vrfSeed(game, joiner.publicKey, joinerEntropy)))
+      .accountsPartial({
+        payer: joiner.publicKey,
+        treasury: owner.publicKey,
+      })
+      .signers([joiner])
+      .rpc();
+    await expectError(
+      () => joinGame({ game, joiner, joinerEntropy }),
+      "InvalidVrfAccounts"
+    );
+    await cancelGame(game, creator);
   });
 
   it("create + join + resolve pays the joiner when they win", async () => {
@@ -1177,7 +1242,7 @@ describe("coinflip", () => {
         vrfProgram: MOCK_VRF_ID,
         vrfNetwork: vrfNetworkPda(),
         vrfTreasury: owner.publicKey,
-        vrfRequest: vrfRequestPda(game),
+        vrfRequest: vrfRequestPda(game, joiner.publicKey, entropy(81)),
       })
       .signers([joiner])
       .rpc();
@@ -1258,7 +1323,7 @@ describe("coinflip", () => {
         vrfProgram: MOCK_VRF_ID,
         vrfNetwork: vrfNetworkPda(),
         vrfTreasury: owner.publicKey,
-        vrfRequest: vrfRequestPda(game),
+        vrfRequest: vrfRequestPda(game, joiner.publicKey, entropy(82)),
       })
       .signers([joiner])
       .rpc();
@@ -1334,7 +1399,7 @@ describe("coinflip", () => {
             vrfProgram: MOCK_VRF_ID,
             vrfNetwork: vrfNetworkPda(),
             vrfTreasury: owner.publicKey,
-            vrfRequest: vrfRequestPda(game),
+            vrfRequest: vrfRequestPda(game, joiner.publicKey, entropy(84)),
           })
           .signers([joiner])
           .rpc(),
@@ -1373,7 +1438,7 @@ describe("coinflip", () => {
             vrfProgram: MOCK_VRF_ID,
             vrfNetwork: vrfNetworkPda(),
             vrfTreasury: owner.publicKey,
-            vrfRequest: vrfRequestPda(game),
+            vrfRequest: vrfRequestPda(game, joiner.publicKey, entropy(83)),
           })
           .signers([joiner])
           .rpc(),

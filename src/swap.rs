@@ -1,5 +1,7 @@
 use crate::errors::CoinflipError;
-use crate::state::{RAYDIUM_CLMM, RAYDIUM_CLMM_DEVNET, RAYDIUM_CLMM_DEVNET_LEGACY};
+use crate::state::RAYDIUM_CLMM;
+#[cfg(feature = "devnet")]
+use crate::state::{RAYDIUM_CLMM_DEVNET, RAYDIUM_CLMM_DEVNET_LEGACY};
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::{
     instruction::{AccountMeta, Instruction},
@@ -13,9 +15,15 @@ pub const HOP_FIXED: usize = 12;
 pub const SWAP_V2_DISCRIMINATOR: [u8; 8] = [43, 4, 237, 11, 26, 201, 30, 98];
 
 pub fn is_clmm_program(program: &Pubkey) -> bool {
-    *program == RAYDIUM_CLMM
-        || *program == RAYDIUM_CLMM_DEVNET
-        || *program == RAYDIUM_CLMM_DEVNET_LEGACY
+    if *program == RAYDIUM_CLMM {
+        return true;
+    }
+    #[cfg(feature = "devnet")]
+    {
+        return *program == RAYDIUM_CLMM_DEVNET || *program == RAYDIUM_CLMM_DEVNET_LEGACY;
+    }
+    #[cfg(not(feature = "devnet"))]
+    false
 }
 
 pub fn split_hops<'a, 'info>(

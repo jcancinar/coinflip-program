@@ -16,7 +16,9 @@ pub const AUTHORITY_CANCEL_DELAY_SLOTS: u64 = 32;
 
 pub const WSOL_MINT: Pubkey = pubkey!("So11111111111111111111111111111111111111112");
 pub const RAYDIUM_CLMM: Pubkey = pubkey!("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
+#[cfg(feature = "devnet")]
 pub const RAYDIUM_CLMM_DEVNET: Pubkey = pubkey!("DRayAUgENGQBKVaX8owNhgzkEDyoHTGVEGHVJT1E9pfH");
+#[cfg(feature = "devnet")]
 pub const RAYDIUM_CLMM_DEVNET_LEGACY: Pubkey =
     pubkey!("devi51mZmdwUJGU9hjN27vEz64Gps7uUefqxg27EAtH");
 pub const TOKEN_PROGRAM_ID: Pubkey = pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
@@ -25,6 +27,7 @@ pub const TOKEN_PROGRAM_ID: Pubkey = pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9S
 #[derive(InitSpace)]
 pub struct Config {
     pub authority: Pubkey,
+    /// Unused. Kept so existing config accounts keep their layout.
     pub resolver: Pubkey,
     pub fee_bps: u16,
     pub paused: bool,

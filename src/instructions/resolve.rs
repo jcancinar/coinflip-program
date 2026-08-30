@@ -60,7 +60,7 @@ pub fn handler(ctx: Context<Resolve>) -> Result<()> {
     let game = &ctx.accounts.game;
     require!(game.status == GameStatus::Ready, CoinflipError::NotReady);
 
-    let seed = vrf_seed(&game.key());
+    let seed = vrf_seed(&game.key(), &game.joiner, &game.joiner_entropy);
     let randomness = fulfilled_randomness(
         &ctx.accounts.vrf_request.to_account_info(),
         &ctx.accounts.config.vrf_program,
