@@ -6,6 +6,7 @@ pub mod join;
 pub mod participate;
 pub mod refund;
 pub mod resolve;
+pub mod trade;
 
 pub use admin::*;
 pub use cancel::*;
@@ -15,3 +16,4 @@ pub use join::*;
 pub use participate::*;
 pub use refund::*;
 pub use resolve::*;
+pub use trade::*;

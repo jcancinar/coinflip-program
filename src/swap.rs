@@ -40,25 +40,26 @@ pub fn split_hops<'a, 'info>(
     Ok((&remaining[..n], &remaining[n..]))
 }
 
-pub fn swap_exact_out<'info>(
+fn invoke_swap_v2<'info>(
     clmm: AccountInfo<'info>,
     owner: AccountInfo<'info>,
     hop: &[AccountInfo<'info>],
     expected_pool: &Pubkey,
-    max_amount_in: u64,
-    amount_out: u64,
+    amount: u64,
+    other_amount_threshold: u64,
+    is_base_input: bool,
 ) -> Result<()> {
     require!(hop.len() >= HOP_FIXED, CoinflipError::InvalidSwapAccounts);
     require!(is_clmm_program(&clmm.key()), CoinflipError::InvalidSwapAccounts);
     require_keys_eq!(hop[1].key(), *expected_pool, CoinflipError::InvalidPool);
-    require!(amount_out > 0, CoinflipError::InvalidAmount);
-    require!(max_amount_in > 0, CoinflipError::InvalidAmount);
+    require!(amount > 0, CoinflipError::InvalidAmount);
+    require!(other_amount_threshold > 0, CoinflipError::InvalidAmount);
 
     let mut data = SWAP_V2_DISCRIMINATOR.to_vec();
-    data.extend_from_slice(&amount_out.to_le_bytes());
-    data.extend_from_slice(&max_amount_in.to_le_bytes());
+    data.extend_from_slice(&amount.to_le_bytes());
+    data.extend_from_slice(&other_amount_threshold.to_le_bytes());
     data.extend_from_slice(&0u128.to_le_bytes());
-    data.push(0); // is_base_input = false → exact out
+    data.push(u8::from(is_base_input));
 
     let mut accounts = vec![AccountMeta::new_readonly(owner.key(), true)];
     let mut infos = vec![owner.clone(), clmm.clone()];
@@ -81,6 +82,28 @@ pub fn swap_exact_out<'info>(
         &infos,
     )?;
     Ok(())
+}
+
+pub fn swap_exact_out<'info>(
+    clmm: AccountInfo<'info>,
+    owner: AccountInfo<'info>,
+    hop: &[AccountInfo<'info>],
+    expected_pool: &Pubkey,
+    max_amount_in: u64,
+    amount_out: u64,
+) -> Result<()> {
+    invoke_swap_v2(clmm, owner, hop, expected_pool, amount_out, max_amount_in, false)
+}
+
+pub fn swap_exact_in<'info>(
+    clmm: AccountInfo<'info>,
+    owner: AccountInfo<'info>,
+    hop: &[AccountInfo<'info>],
+    expected_pool: &Pubkey,
+    amount_in: u64,
+    min_amount_out: u64,
+) -> Result<()> {
+    invoke_swap_v2(clmm, owner, hop, expected_pool, amount_in, min_amount_out, true)
 }
 
 pub fn token_amount(account: &AccountInfo) -> Result<u64> {

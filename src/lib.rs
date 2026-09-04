@@ -122,6 +122,35 @@ pub mod coinflip {
         )
     }
 
+    pub fn buy_token<'info>(
+        ctx: Context<'_, '_, 'info, 'info, BuyToken<'info>>,
+        amount_out: u64,
+        pay_mint: Pubkey,
+        max_pay: u64,
+        quote_out: u64,
+        hop1_len: u8,
+    ) -> Result<()> {
+        instructions::trade::buy_token(ctx, amount_out, pay_mint, max_pay, quote_out, hop1_len)
+    }
+
+    pub fn sell_token<'info>(
+        ctx: Context<'_, '_, 'info, 'info, SellToken<'info>>,
+        amount_in: u64,
+        receive_mint: Pubkey,
+        min_out: u64,
+        min_quote_out: u64,
+        hop1_len: u8,
+    ) -> Result<()> {
+        instructions::trade::sell_token(
+            ctx,
+            amount_in,
+            receive_mint,
+            min_out,
+            min_quote_out,
+            hop1_len,
+        )
+    }
+
     pub fn resolve(ctx: Context<Resolve>) -> Result<()> {
         instructions::resolve::handler(ctx)
     }

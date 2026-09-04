@@ -49,6 +49,13 @@ const TOKENS = [
     max: pad(new anchor.BN(50_000_000)),
   },
   {
+    symbol: "AAPLx",
+    mint: "XsbEhLAtcf6HdfpFZ5xEMdqW8nfAvcsP5bdudRLJzJp",
+    pool: "CKwJZwm7oj3nu4653N1EpDrqXbXAYXoPFiPeEnLouF8y",
+    min: new anchor.BN(500_000),
+    max: pad(new anchor.BN(50_000_000)),
+  },
+  {
     symbol: "METAx",
     mint: "Xsa62P5mvPszXL1krVUnU5ar38bBSVcWAB6fmPCo5Zu",
     pool: "3L7KbPVaAQA4UTecaGQYsm6UCq5F3sZM9zAYkxqYt63j",

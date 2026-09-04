@@ -8,6 +8,8 @@ pub const BPS_DENOMINATOR: u16 = 10_000;
 pub const DEFAULT_FEE_BPS: u16 = 350;
 /// 5% of pot. Snapshotted onto each game at create; changing this does not affect open games.
 pub const MAX_FEE_BPS: u16 = 500;
+/// 1% protocol fee on buy_token / sell_token, paid to `config.authority`.
+pub const TRADE_FEE_BPS: u16 = 100;
 /// 0.01 SOL. Admin can raise or lower this for new games via `set_sol_min_amount`.
 pub const DEFAULT_SOL_MIN_AMOUNT: u64 = 10_000_000;
 /// ~1 SOL advertised (~$100), including the 3.5% fee pad so a 1 SOL flip can be created.
@@ -115,6 +117,41 @@ pub fn pot_fee(amount: u64, fee_bps: u16) -> Result<u64> {
         .ok_or(crate::errors::CoinflipError::ArithmeticOverflow)?
         / u128::from(BPS_DENOMINATOR);
     u64::try_from(fee).map_err(|_| error!(crate::errors::CoinflipError::ArithmeticOverflow))
+}
+
+/// Floor fee: `amount * bps / 10_000`.
+pub fn trade_fee(amount: u64, fee_bps: u16) -> Result<u64> {
+    let fee = u128::from(amount)
+        .checked_mul(u128::from(fee_bps))
+        .ok_or(crate::errors::CoinflipError::ArithmeticOverflow)?
+        / u128::from(BPS_DENOMINATOR);
+    u64::try_from(fee).map_err(|_| error!(crate::errors::CoinflipError::ArithmeticOverflow))
+}
+
+/// Max input available for the swap after reserving the trade fee from `max_pay`.
+pub fn max_swap_in_after_fee(max_pay: u64) -> Result<u64> {
+    let keep = u128::from(BPS_DENOMINATOR)
+        .checked_sub(u128::from(TRADE_FEE_BPS))
+        .ok_or(crate::errors::CoinflipError::ArithmeticOverflow)?;
+    let max_swap = u128::from(max_pay)
+        .checked_mul(keep)
+        .ok_or(crate::errors::CoinflipError::ArithmeticOverflow)?
+        / u128::from(BPS_DENOMINATOR);
+    u64::try_from(max_swap).map_err(|_| error!(crate::errors::CoinflipError::ArithmeticOverflow))
+}
+
+/// Minimum swap output so that after the trade fee the user still receives `min_out`.
+pub fn min_swap_out_before_fee(min_out: u64) -> Result<u64> {
+    let keep = u128::from(BPS_DENOMINATOR)
+        .checked_sub(u128::from(TRADE_FEE_BPS))
+        .ok_or(crate::errors::CoinflipError::ArithmeticOverflow)?;
+    let gross = u128::from(min_out)
+        .checked_mul(u128::from(BPS_DENOMINATOR))
+        .ok_or(crate::errors::CoinflipError::ArithmeticOverflow)?
+        .checked_add(keep - 1)
+        .ok_or(crate::errors::CoinflipError::ArithmeticOverflow)?
+        / keep;
+    u64::try_from(gross).map_err(|_| error!(crate::errors::CoinflipError::ArithmeticOverflow))
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq, InitSpace)]
