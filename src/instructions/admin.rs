@@ -1,6 +1,7 @@
 use crate::errors::CoinflipError;
 use crate::state::{
-    Config, TokenConfig, CONFIG_SEED, DEFAULT_SOL_MIN_AMOUNT, MAX_FEE_BPS, TOKEN_SEED,
+    Config, TokenConfig, CONFIG_SEED, DEFAULT_SOL_MAX_AMOUNT, DEFAULT_SOL_MIN_AMOUNT, MAX_FEE_BPS,
+    TOKEN_SEED,
 };
 use crate::vrf::ORAO_VRF_ID;
 use anchor_lang::prelude::*;
@@ -84,6 +85,7 @@ pub fn enable_token(
     ctx: Context<EnableToken>,
     mint: Pubkey,
     min_amount: u64,
+    max_amount: u64,
     is_enabled: bool,
     pool: Pubkey,
     quote_mint: Pubkey,
@@ -91,6 +93,7 @@ pub fn enable_token(
 ) -> Result<()> {
     if is_enabled {
         require!(min_amount > 0, CoinflipError::InvalidMinAmount);
+        require!(max_amount >= min_amount, CoinflipError::InvalidMaxAmount);
         require!(pool != Pubkey::default(), CoinflipError::PoolRequired);
         let quote_ok = crate::state::is_sol_mint(&quote_mint)
             || (ctx.accounts.config.usdc_mint != Pubkey::default()
@@ -106,6 +109,7 @@ pub fn enable_token(
     token_config.pool = pool;
     token_config.quote_mint = quote_mint;
     token_config.cross_disabled = cross_disabled;
+    token_config.max_amount = max_amount;
     Ok(())
 }
 
@@ -147,7 +151,33 @@ pub struct SetSolMinAmount<'info> {
 
 pub fn set_sol_min_amount(ctx: Context<SetSolMinAmount>, sol_min_amount: u64) -> Result<()> {
     require!(sol_min_amount > 0, CoinflipError::InvalidMinAmount);
+    let max = ctx.accounts.config.sol_max_amount;
+    if max > 0 {
+        require!(sol_min_amount <= max, CoinflipError::InvalidMaxAmount);
+    }
     ctx.accounts.config.sol_min_amount = sol_min_amount;
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct SetSolMaxAmount<'info> {
+    #[account(
+        mut,
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+        has_one = authority @ CoinflipError::Unauthorized
+    )]
+    pub config: Account<'info, Config>,
+    pub authority: Signer<'info>,
+}
+
+pub fn set_sol_max_amount(ctx: Context<SetSolMaxAmount>, sol_max_amount: u64) -> Result<()> {
+    require!(sol_max_amount > 0, CoinflipError::InvalidMaxAmount);
+    require!(
+        sol_max_amount >= ctx.accounts.config.sol_min_amount,
+        CoinflipError::InvalidMaxAmount
+    );
+    ctx.accounts.config.sol_max_amount = sol_max_amount;
     Ok(())
 }
 
@@ -240,14 +270,18 @@ fn resize_owned_account<'info>(
 
 fn init_new_config_fields(config: &AccountInfo) -> Result<()> {
     let mut data = config.try_borrow_mut_data()?;
-    let vrf_off = 8 + Config::INIT_SPACE - 32;
+    let sol_max_off = 8 + Config::INIT_SPACE - 8;
+    let vrf_off = sol_max_off - 32;
     let sol_off = vrf_off - 8;
-    require!(data.len() >= vrf_off + 32, CoinflipError::Unauthorized);
+    require!(data.len() >= sol_max_off + 8, CoinflipError::Unauthorized);
     if data[sol_off..sol_off + 8] == [0u8; 8] {
         data[sol_off..sol_off + 8].copy_from_slice(&DEFAULT_SOL_MIN_AMOUNT.to_le_bytes());
     }
     if data[vrf_off..vrf_off + 32] == [0u8; 32] {
         data[vrf_off..vrf_off + 32].copy_from_slice(ORAO_VRF_ID.as_ref());
+    }
+    if data[sol_max_off..sol_max_off + 8] == [0u8; 8] {
+        data[sol_max_off..sol_max_off + 8].copy_from_slice(&DEFAULT_SOL_MAX_AMOUNT.to_le_bytes());
     }
     Ok(())
 }

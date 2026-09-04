@@ -1,5 +1,7 @@
 use crate::errors::CoinflipError;
-use crate::state::{Config, CONFIG_SEED, DEFAULT_FEE_BPS, DEFAULT_SOL_MIN_AMOUNT};
+use crate::state::{
+    Config, CONFIG_SEED, DEFAULT_FEE_BPS, DEFAULT_SOL_MAX_AMOUNT, DEFAULT_SOL_MIN_AMOUNT,
+};
 use anchor_lang::prelude::*;
 
 #[derive(Accounts)]
@@ -29,5 +31,6 @@ pub fn handler(ctx: Context<Initialize>, vrf_program: Pubkey) -> Result<()> {
     config.sol_usdc_pool = Pubkey::default();
     config.sol_min_amount = DEFAULT_SOL_MIN_AMOUNT;
     config.vrf_program = vrf_program;
+    config.sol_max_amount = DEFAULT_SOL_MAX_AMOUNT;
     Ok(())
 }

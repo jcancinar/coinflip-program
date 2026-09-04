@@ -61,6 +61,13 @@ pub fn handler(
     amount: u64,
 ) -> Result<()> {
     require!(!ctx.accounts.config.paused, CoinflipError::Paused);
+    if ctx.accounts.game.house_only {
+        require_keys_eq!(
+            ctx.accounts.joiner.key(),
+            ctx.accounts.config.house(),
+            CoinflipError::HouseOnly
+        );
+    }
     let (mint, decimals) = apply_join(
         &mut ctx.accounts.game,
         ctx.accounts.joiner.key(),

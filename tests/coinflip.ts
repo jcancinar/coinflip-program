@@ -21,6 +21,7 @@ const VRF_SEED_PREFIX = Buffer.from("coinflip_vrf_seed_v1");
 const MOCK_VRF_PREFIX = Buffer.from("coinflip_mock_vrf");
 const MOCK_VRF_ID = new PublicKey("8DeY7XokDSxSC5nJjwuoYW8Ajjo36UH9XXpu247tcJWf");
 const AMOUNT = new anchor.BN(50_000_000);
+const TEST_MAX = new anchor.BN("1000000000000");
 const DEFAULT_FEE_BPS = 350;
 const BPS_DENOMINATOR = 10_000;
 const WSOL_MINT = new PublicKey("So11111111111111111111111111111111111111112");
@@ -129,6 +130,7 @@ describe("coinflip", () => {
     creatorEntropy?: Buffer;
     gameNonce?: anchor.BN;
     mint?: PublicKey;
+    houseOnly?: boolean;
     tokenAccounts?: Record<string, PublicKey>;
   }) {
     const gameNonce = params.gameNonce ?? nextNonce();
@@ -139,7 +141,7 @@ describe("coinflip", () => {
     const game = gamePdaFor(params.creator.publicKey, gameNonce);
 
     await program.methods
-      .create(amount, side, Array.from(creatorEntropy), gameNonce, mint)
+      .create(amount, side, Array.from(creatorEntropy), gameNonce, mint, params.houseOnly ?? false)
       .accountsPartial({
         creator: params.creator.publicKey,
         tokenConfig: null,
@@ -324,6 +326,7 @@ describe("coinflip", () => {
     assert.equal(config.feeBps, DEFAULT_FEE_BPS);
     assert.isFalse(config.paused);
     assert.equal(config.solMinAmount.toString(), "10000000");
+    assert.equal(config.solMaxAmount.toString(), "1040000000");
   });
 
   it("create + cancel refunds the creator and closes the game", async () => {
@@ -748,7 +751,7 @@ describe("coinflip", () => {
     await expectError(
       () =>
         program.methods
-          .enableToken(mint, minAmount, true, DUMMY_POOL, WSOL_MINT, false)
+          .enableToken(mint, minAmount, TEST_MAX, true, DUMMY_POOL, WSOL_MINT, false)
           .accountsPartial({
             authority: creator.publicKey,
           })
@@ -760,7 +763,7 @@ describe("coinflip", () => {
     await expectError(
       () =>
         program.methods
-          .enableToken(mint, new anchor.BN(0), true, DUMMY_POOL, WSOL_MINT, false)
+          .enableToken(mint, new anchor.BN(0), TEST_MAX, true, DUMMY_POOL, WSOL_MINT, false)
           .accountsPartial({
             authority: owner.publicKey,
           })
@@ -771,7 +774,7 @@ describe("coinflip", () => {
     await expectError(
       () =>
         program.methods
-          .enableToken(mint, minAmount, true, PublicKey.default, WSOL_MINT, false)
+          .enableToken(mint, minAmount, TEST_MAX, true, PublicKey.default, WSOL_MINT, false)
           .accountsPartial({
             authority: owner.publicKey,
           })
@@ -780,7 +783,7 @@ describe("coinflip", () => {
     );
 
     await program.methods
-      .enableToken(mint, minAmount, true, DUMMY_POOL, WSOL_MINT, false)
+      .enableToken(mint, minAmount, TEST_MAX, true, DUMMY_POOL, WSOL_MINT, false)
       .accountsPartial({
         authority: owner.publicKey,
       })
@@ -789,6 +792,7 @@ describe("coinflip", () => {
     let tokenConfig = await program.account.tokenConfig.fetch(tokenConfigPda);
     assert.equal(tokenConfig.mint.toBase58(), mint.toBase58());
     assert.equal(tokenConfig.minAmount.toString(), minAmount.toString());
+    assert.equal(tokenConfig.maxAmount.toString(), TEST_MAX.toString());
     assert.isTrue(tokenConfig.isEnabled);
     assert.equal(tokenConfig.pool.toBase58(), DUMMY_POOL.toBase58());
     assert.equal(tokenConfig.quoteMint.toBase58(), WSOL_MINT.toBase58());
@@ -796,7 +800,7 @@ describe("coinflip", () => {
 
     const updatedMin = new anchor.BN(2_500_000);
     await program.methods
-      .enableToken(mint, updatedMin, false, PublicKey.default, PublicKey.default, false)
+      .enableToken(mint, updatedMin, new anchor.BN(0), false, PublicKey.default, PublicKey.default, false)
       .accountsPartial({
         authority: owner.publicKey,
       })
@@ -816,7 +820,7 @@ describe("coinflip", () => {
     );
 
     await program.methods
-      .enableToken(mint, new anchor.BN(1_000_000), true, DUMMY_POOL, WSOL_MINT, false)
+      .enableToken(mint, new anchor.BN(1_000_000), TEST_MAX, true, DUMMY_POOL, WSOL_MINT, false)
       .accountsPartial({ authority: owner.publicKey })
       .rpc();
 
@@ -921,7 +925,7 @@ describe("coinflip", () => {
       program.programId
     );
     await program.methods
-      .enableToken(mint, new anchor.BN(1_000_000), true, DUMMY_POOL, WSOL_MINT, false)
+      .enableToken(mint, new anchor.BN(1_000_000), TEST_MAX, true, DUMMY_POOL, WSOL_MINT, false)
       .accountsPartial({ authority: owner.publicKey })
       .rpc();
 
@@ -973,7 +977,7 @@ describe("coinflip", () => {
       program.programId
     );
     await program.methods
-      .enableToken(mint, new anchor.BN(1_000_000), true, DUMMY_POOL, WSOL_MINT, false)
+      .enableToken(mint, new anchor.BN(1_000_000), TEST_MAX, true, DUMMY_POOL, WSOL_MINT, false)
       .accountsPartial({ authority: owner.publicKey })
       .rpc();
 
@@ -1105,7 +1109,7 @@ describe("coinflip", () => {
     await mintTo(connection, owner, mint, creatorAta, owner, 10_000_000);
 
     await program.methods
-      .enableToken(mint, new anchor.BN(5_000_000), true, DUMMY_POOL, WSOL_MINT, false)
+      .enableToken(mint, new anchor.BN(5_000_000), TEST_MAX, true, DUMMY_POOL, WSOL_MINT, false)
       .accountsPartial({ authority: owner.publicKey })
       .rpc();
 
@@ -1192,6 +1196,123 @@ describe("coinflip", () => {
       .rpc();
   });
 
+  it("rejects games above the configured maximum", async () => {
+    await expectError(
+      () =>
+        program.methods
+          .setSolMaxAmount(new anchor.BN(0))
+          .accountsPartial({ authority: owner.publicKey })
+          .rpc(),
+      "InvalidMaxAmount"
+    );
+
+    const cap = new anchor.BN(40_000_000);
+    await program.methods
+      .setSolMaxAmount(cap)
+      .accountsPartial({ authority: owner.publicKey })
+      .rpc();
+    const over = await createGame({ creator, amount: AMOUNT });
+    await cancelGame(over.game, creator);
+    await expectError(
+      () => createGame({ creator, amount: AMOUNT, houseOnly: true }),
+      "AmountAboveMaximum"
+    );
+    await program.methods
+      .setSolMaxAmount(new anchor.BN(1_040_000_000))
+      .accountsPartial({ authority: owner.publicKey })
+      .rpc();
+
+    const mint = await createMint(connection, owner, owner.publicKey, null, 6);
+    const [tokenConfigPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("token"), mint.toBuffer()],
+      program.programId
+    );
+    await expectError(
+      () =>
+        program.methods
+          .enableToken(
+            mint,
+            new anchor.BN(5_000_000),
+            new anchor.BN(1_000_000),
+            true,
+            DUMMY_POOL,
+            WSOL_MINT,
+            false
+          )
+          .accountsPartial({ authority: owner.publicKey })
+          .rpc(),
+      "InvalidMaxAmount"
+    );
+    await program.methods
+      .enableToken(
+        mint,
+        new anchor.BN(1_000_000),
+        new anchor.BN(2_000_000),
+        true,
+        DUMMY_POOL,
+        WSOL_MINT,
+        false
+      )
+      .accountsPartial({ authority: owner.publicKey })
+      .rpc();
+    const creatorAta = await createAssociatedTokenAccountIdempotent(
+      connection,
+      owner,
+      mint,
+      creator.publicKey
+    );
+    await mintTo(connection, owner, mint, creatorAta, owner, 10_000_000);
+    const openNonce = nextNonce();
+    const overToken = await createGame({
+      creator,
+      amount: new anchor.BN(3_000_000),
+      gameNonce: openNonce,
+      mint,
+      tokenAccounts: {
+        tokenConfig: tokenConfigPda,
+        mintAccount: mint,
+        creatorToken: creatorAta,
+        vault: getAssociatedTokenAddressSync(
+          mint,
+          gamePdaFor(creator.publicKey, openNonce),
+          true
+        ),
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+      },
+    });
+    await cancelGame(overToken.game, creator, {
+      mintAccount: mint,
+      creatorToken: creatorAta,
+      vault: getAssociatedTokenAddressSync(mint, overToken.game, true),
+      tokenProgram: TOKEN_PROGRAM_ID,
+    });
+    const houseNonce = nextNonce();
+    await expectError(
+      () =>
+        createGame({
+          creator,
+          amount: new anchor.BN(3_000_000),
+          gameNonce: houseNonce,
+          mint,
+          houseOnly: true,
+          tokenAccounts: {
+            tokenConfig: tokenConfigPda,
+            mintAccount: mint,
+            creatorToken: creatorAta,
+            vault: getAssociatedTokenAddressSync(
+              mint,
+              gamePdaFor(creator.publicKey, houseNonce),
+              true
+            ),
+            tokenProgram: TOKEN_PROGRAM_ID,
+            associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          },
+        }),
+      "AmountAboveMaximum"
+    );
+  });
+
   it("owner can set the SOL-USDC pool", async () => {
     const usdc = Keypair.generate().publicKey;
     await program.methods
@@ -1260,7 +1381,7 @@ describe("coinflip", () => {
       program.programId
     );
     await program.methods
-      .enableToken(mint, new anchor.BN(1_000_000), true, DUMMY_POOL, WSOL_MINT, false)
+      .enableToken(mint, new anchor.BN(1_000_000), TEST_MAX, true, DUMMY_POOL, WSOL_MINT, false)
       .accountsPartial({ authority: owner.publicKey })
       .rpc();
 
@@ -1341,7 +1462,7 @@ describe("coinflip", () => {
       program.programId
     );
     await program.methods
-      .enableToken(mint, new anchor.BN(1_000_000), true, DUMMY_POOL, WSOL_MINT, true)
+      .enableToken(mint, new anchor.BN(1_000_000), TEST_MAX, true, DUMMY_POOL, WSOL_MINT, true)
       .accountsPartial({ authority: owner.publicKey })
       .rpc();
 
@@ -1444,5 +1565,36 @@ describe("coinflip", () => {
           .rpc(),
       "InvalidPayMint"
     );
+  });
+
+  it("rejects house-only create with an open side", async () => {
+    await expectError(
+      () => createGame({ creator, side: { open: {} }, houseOnly: true }),
+      "HouseOnlyRequiresSide"
+    );
+  });
+
+  it("rejects a non-house join on a house-only game", async () => {
+    const { game } = await createGame({
+      creator,
+      side: { heads: {} },
+      houseOnly: true,
+    });
+    await expectError(
+      () => joinGame({ game, joiner, joinerSide: { tails: {} } }),
+      "HouseOnly"
+    );
+  });
+
+  it("lets the house join a house-only game", async () => {
+    const { game } = await createGame({
+      creator,
+      side: { heads: {} },
+      houseOnly: true,
+    });
+    await joinGame({ game, joiner: owner, joinerSide: { tails: {} } });
+    const account = await program.account.game.fetch(game);
+    assert.isTrue(account.houseOnly);
+    assert.ok(account.joiner.equals(owner.publicKey));
   });
 });

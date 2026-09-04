@@ -53,8 +53,12 @@ pub fn handler(
     creator_entropy: [u8; 32],
     nonce: u64,
     mint: Pubkey,
+    house_only: bool,
 ) -> Result<()> {
     require!(!ctx.accounts.config.paused, CoinflipError::Paused);
+    if house_only {
+        require!(side != Side::Open, CoinflipError::HouseOnlyRequiresSide);
+    }
     require!(
         ctx.accounts.config.fee_bps <= MAX_FEE_BPS,
         CoinflipError::InvalidFeeBps
@@ -67,6 +71,12 @@ pub fn handler(
             amount >= ctx.accounts.config.sol_min_amount,
             CoinflipError::AmountBelowMinimum
         );
+        if house_only && ctx.accounts.config.sol_max_amount > 0 {
+            require!(
+                amount <= ctx.accounts.config.sol_max_amount,
+                CoinflipError::AmountAboveMaximum
+            );
+        }
         0
     } else {
         let token_config = ctx
@@ -75,6 +85,12 @@ pub fn handler(
             .as_ref()
             .ok_or(CoinflipError::TokenNotEnabled)?;
         require_enabled_token(token_config, mint, amount)?;
+        if house_only && token_config.max_amount > 0 {
+            require!(
+                amount <= token_config.max_amount,
+                CoinflipError::AmountAboveMaximum
+            );
+        }
 
         let mint_account = ctx
             .accounts
@@ -101,6 +117,7 @@ pub fn handler(
         game.nonce = nonce;
         game.join_slot = 0;
         game.cancel_after_slot = 0;
+        game.house_only = house_only;
         game.bump = ctx.bumps.game;
     }
 

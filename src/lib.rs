@@ -11,7 +11,7 @@ pub mod vrf;
 use instructions::*;
 use state::*;
 
-declare_id!("sc6TuL2w5UWBM9ygRZbH1MVjc7oLHZTgv1mg3Q1c21E");
+declare_id!("FLipUd6iHP9KTncLCt6Jo9bXXaz4yV4SuDpZdgRqVRHe");
 
 #[program]
 pub mod coinflip {
@@ -37,6 +37,7 @@ pub mod coinflip {
         ctx: Context<EnableToken>,
         mint: Pubkey,
         min_amount: u64,
+        max_amount: u64,
         is_enabled: bool,
         pool: Pubkey,
         quote_mint: Pubkey,
@@ -46,6 +47,7 @@ pub mod coinflip {
             ctx,
             mint,
             min_amount,
+            max_amount,
             is_enabled,
             pool,
             quote_mint,
@@ -65,6 +67,10 @@ pub mod coinflip {
         instructions::admin::set_sol_min_amount(ctx, sol_min_amount)
     }
 
+    pub fn set_sol_max_amount(ctx: Context<SetSolMaxAmount>, sol_max_amount: u64) -> Result<()> {
+        instructions::admin::set_sol_max_amount(ctx, sol_max_amount)
+    }
+
     pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {
         instructions::admin::migrate_config(ctx)
     }
@@ -80,8 +86,9 @@ pub mod coinflip {
         creator_entropy: [u8; 32],
         nonce: u64,
         mint: Pubkey,
+        house_only: bool,
     ) -> Result<()> {
-        instructions::create::handler(ctx, amount, side, creator_entropy, nonce, mint)
+        instructions::create::handler(ctx, amount, side, creator_entropy, nonce, mint, house_only)
     }
 
     pub fn join(

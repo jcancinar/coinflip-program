@@ -34,6 +34,10 @@ pub enum CoinflipError {
     TokenNotEnabled,
     #[msg("Amount is below the token minimum")]
     AmountBelowMinimum,
+    #[msg("Amount is above the token maximum")]
+    AmountAboveMaximum,
+    #[msg("Maximum must be at least the minimum when the token is enabled")]
+    InvalidMaxAmount,
     #[msg("Mint does not match the game or token config")]
     InvalidMint,
     #[msg("Token accounts are required for this mint")]
@@ -68,4 +72,8 @@ pub enum CoinflipError {
     InvalidVrfAccounts,
     #[msg("ORAO randomness is not fulfilled yet")]
     VrfNotFulfilled,
+    #[msg("Only the house can join this game")]
+    HouseOnly,
+    #[msg("House-only games require the creator to pick Heads or Tails")]
+    HouseOnlyRequiresSide,
 }

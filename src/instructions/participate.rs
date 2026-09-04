@@ -71,6 +71,13 @@ pub fn handler<'info>(
     hop1_len: u8,
 ) -> Result<()> {
     require!(!ctx.accounts.config.paused, CoinflipError::Paused);
+    if ctx.accounts.game.house_only {
+        require_keys_eq!(
+            ctx.accounts.joiner.key(),
+            ctx.accounts.config.house(),
+            CoinflipError::HouseOnly
+        );
+    }
 
     let game_mint = ctx.accounts.game.mint;
     if effective_mint(&game_mint) != effective_mint(&pay_mint) {

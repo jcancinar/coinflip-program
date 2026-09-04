@@ -10,6 +10,8 @@ pub const DEFAULT_FEE_BPS: u16 = 350;
 pub const MAX_FEE_BPS: u16 = 500;
 /// 0.01 SOL. Admin can raise or lower this for new games via `set_sol_min_amount`.
 pub const DEFAULT_SOL_MIN_AMOUNT: u64 = 10_000_000;
+/// ~1 SOL advertised (~$100), including the 3.5% fee pad so a 1 SOL flip can be created.
+pub const DEFAULT_SOL_MAX_AMOUNT: u64 = 1_040_000_000;
 /// Authority must wait this many slots after `initiate_cancel` before `cancel`.
 /// ~10s at 300ms slots. Join can still land during the delay.
 pub const AUTHORITY_CANCEL_DELAY_SLOTS: u64 = 32;
@@ -26,6 +28,7 @@ pub const TOKEN_PROGRAM_ID: Pubkey = pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9S
 #[account]
 #[derive(InitSpace)]
 pub struct Config {
+    /// House: upgrade authority and fee recipient.
     pub authority: Pubkey,
     /// Unused. Kept so existing config accounts keep their layout.
     pub resolver: Pubkey,
@@ -36,6 +39,7 @@ pub struct Config {
     pub sol_usdc_pool: Pubkey,
     pub sol_min_amount: u64,
     pub vrf_program: Pubkey,
+    pub sol_max_amount: u64,
 }
 
 #[account]
@@ -48,6 +52,7 @@ pub struct TokenConfig {
     pub pool: Pubkey,
     pub quote_mint: Pubkey,
     pub cross_disabled: bool,
+    pub max_amount: u64,
 }
 
 #[account]
@@ -69,6 +74,14 @@ pub struct Game {
     pub join_slot: u64,
     /// Earliest slot the authority may cancel. 0 = not initiated.
     pub cancel_after_slot: u64,
+    /// When true, only the house (`config.authority`) may join.
+    pub house_only: bool,
+}
+
+impl Config {
+    pub fn house(&self) -> Pubkey {
+        self.authority
+    }
 }
 
 impl Game {

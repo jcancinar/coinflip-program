@@ -6,11 +6,14 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-coinflip = "sc6TuL2w5UWBM9ygRZbH1MVjc7oLHZTgv1mg3Q1c21E"
+coinflip = "FLipUd6iHP9KTncLCt6Jo9bXXaz4yV4SuDpZdgRqVRHe"
 mock_vrf = "8DeY7XokDSxSC5nJjwuoYW8Ajjo36UH9XXpu247tcJWf"
 
 [programs.devnet]
-coinflip = "sc6TuL2w5UWBM9ygRZbH1MVjc7oLHZTgv1mg3Q1c21E"
+coinflip = "FLipUd6iHP9KTncLCt6Jo9bXXaz4yV4SuDpZdgRqVRHe"
+
+[programs.mainnet]
+coinflip = "FLipUd6iHP9KTncLCt6Jo9bXXaz4yV4SuDpZdgRqVRHe"
 
 [registry]
 url = "https://api.apr.dev"
